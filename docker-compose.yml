@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:6.0
+    container_name: mongo
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - watchtower-data:/data/db
+
+  watchtower:
+    build: .
+    container_name: watchtower
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    env_file:
+      - .env
+    environment:
+      - MONGO_HOST=mongo
+      - PYTHONPATH=/app
+    volumes:
+      # Mount your local wordlists, resolvers, nuclei templates
+      - ./volumes/resolvers:/app/config/resolvers:ro
+      - ./volumes/wordlists:/app/config/wordlists:ro
+      - ./volumes/nuclei-templates:/app/nuclei-templates:ro
+      - ./volumes/gau-config:/app/config/gau-config:ro
+      # Optional: persist output files
+      - watchtower-output:/app/output
+      # Your program JSON files are already in the image, but you can override:
+      # - ./programs:/app/programs:ro
+    command: ["all"]
+
+  # Optional: API server (run with: docker compose --profile api up)
+  api:
+    build: .
+    container_name: watchtower-api
+    profiles: ["api"]
+    depends_on:
+      - mongo
+    env_file:
+      - .env
+    environment:
+      - MONGO_HOST=mongo
+      - PYTHONPATH=/app
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./volumes/resolvers:/app/config/resolvers:ro
+      - ./volumes/wordlists:/app/config/wordlists:ro
+      - ./volumes/gau-config:/app/config/gau-config:ro
+    command: ["api"]
+
+  # API-only service (always running)
+  # Uses the same image as watchtower but runs uvicorn instead
+  api-server:
+    build: .
+    container_name: watchtower-api-server
+    profiles: ["api-server"]
+    depends_on:
+      - mongo
+    env_file:
+      - .env
+    environment:
+      - MONGO_HOST=mongo
+      - PYTHONPATH=/app
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./volumes/resolvers:/app/config/resolvers:ro
+      - ./volumes/wordlists:/app/config/wordlists:ro
+      - ./volumes/gau-config:/app/config/gau-config:ro
+    command: ["api"]
+
+volumes:
+  watchtower-data:
+  watchtower-output:

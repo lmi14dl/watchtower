@@ -1,0 +1,8 @@
+flask
+fastapi
+uvicorn[standard]
+tldextract
+mongoengine
+requests
+psycopg2-binary
+python-dotenv

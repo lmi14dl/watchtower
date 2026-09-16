@@ -1,0 +1,51 @@
+# Headers to include with all HTTP request
+header:
+  - 'X-BugBounty-Hacker: Hackerone'
+  - 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:108.0) Gecko/20100101 Firefox/108.0'
+
+# maximum number of templates executed in parallel
+concurrency: 25
+rate-limit: 100
+
+# Template Denylist
+exclude-tags: technologies,tech,ssl,dns
+severity: critical,high,medium,low
+
+exclude-templates:
+  - vulnerabilities/wordpress/wp-license-file.yaml
+  - vulnerabilities/wordpress/wordpress-rdf-user-enum.yaml
+  - vulnerabilities/generic/request-based-interaction.yaml
+  - vulnerabilities/wordpress/wordpress-user-enum.yaml
+  - vulnerabilities/wordpress/wordpress-xmlrpc-listmethods.yaml
+  - vulnerabilities/wordpress/wp-xmlrpc.yaml
+  - vulnerabilities/generic/cors-misconfig.yaml
+  - vulnerabilities/wordpress/wp-full-path-disclosure.yaml
+  - vulnerabilities/wordpress/wp-altair-listing.yaml
+  - vulnerabilities/wordpress/wordpress-tmm-db-migrate.yaml
+  - vulnerabilities/wordpress/wp-123contactform-plugin-listing.yaml
+  - vulnerabilities/wordpress/wp-iwp-client-listing.yaml
+  - vulnerabilities/wordpress/wordpress-updraftplus-pem-key.yaml
+  - vulnerabilities/wordpress/wordpress-elementor-plugin-listing.yaml
+  - vulnerabilities/wordpress/wp-enabled-registration.yaml
+  - vulnerabilities/wordpress/easy-media-gallery-pro-listing.yaml
+  - vulnerabilities/wordpress/wordpress-directory-listing.yaml
+  - vulnerabilities/wordpress/wordpress-woocommerce-listing.yaml
+  - vulnerabilities/wordpress/wp-sfwd-lms-listing.yaml
+  - vulnerabilities/wordpress/wordpress-git-config.yaml
+  - vulnerabilities/wordpress/wp-popup-listing.yaml
+  - vulnerabilities/wordpress/wp-plugin-lifterlms.yaml
+  - vulnerabilities/wordpress/wp-plugin-lifterlms.yaml
+  - vulnerabilities/wordpress/wp-xmlrpc-pingback-detection.yaml
+  - vulnerabilities/wordpress/wordpress-emeidgacy-soript.yaml
+  - vulnerabilities/wordpress/wp-aforms-listing.yaml
+  - vulnerabilities/wordpress/wordpress-gettranslate-plugin-listing.yaml
+  - vulnerabilities/wordpress/wordpress-redirection-plugin-listing.yaml
+  - vulnerabilities/wordpress/wp-plugin-ultimate-member.yaml
+  - vulnerabilities/wordpress/wp-plugin-i-flashgallery-listing.yaml
+  - vulnerabilities/wordpress/wordpress-installer-log.yaml
+  - vulnerabilities/wordpress/wp-idx-broker-platinum-listing.yaml
+  - vulnerabilities/wordpress/wordpress-bbpress-plugin-listing.yaml
+  - vulnerabilities/generic/oob-param-based-interaction.yaml
+  - vulnerabilities/generic/cache-poisoning.yaml
+  - vulnerabilities/generic/host-header-injection.yaml
+  - vulnerabilities/generic/oob-header-based-interaction.yaml

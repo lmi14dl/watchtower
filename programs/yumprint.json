@@ -1,0 +1,5 @@
+{
+    "program_name": "yumprint",
+    "scopes": ["yumprint.com","yumprint.com.au"],
+    "ooscopes": [""]
+}

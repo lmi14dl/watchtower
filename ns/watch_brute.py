@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+import sys, os, subprocess, tempfile, json
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from config import config
+from database.db import *
+
+class colors:
+    GRAY = "\033[90m"
+    RESET = "\033[0m"
+
+def run_command_in_bash(command):
+    try:
+        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print("Error occured:", result.stderr)
+            return False
+
+        return result.stdout.splitlines()
+        
+    except subprocess.CalledProcessError as exc:
+        print("Status: FAIL", exc.returncode, exc.output)
+
+def create_tempfile(data):
+    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+        temp_file.write(data)
+        return temp_file.name
+
+def create_worlist(domain):
+    with open(config().get('DNS_BRUTE_WORDLIST'), "r", encoding="utf-8") as infile, \
+        tempfile.NamedTemporaryFile(delete=False, mode='w') as output_file:
+            for line in infile:
+                word = line.strip()
+                if word:
+                    output_file.write(f"{word}.{domain}\n")
+            return output_file.name
+
+
+def brute_force(subdomains_array, domain):
+
+    word_list = create_worlist(domain)
+    command = f"shuffledns -list {word_list} -silent -d {domain} -mode resolve -r {config()['RESOLVERS_PATH']} -m $(which massdns) -t 30 -silent | dnsx -silent -a -resp -json -r {config()['RESOLVERS_PATH']}"
+
+    print(f"{colors.GRAY}Executing commands: {command}{colors.RESET}")
+    results = run_command_in_bash(command)
+    for res in results:
+        # TODO: check if IP belongs to cdn or not, if yes then skip, if no add {'cdn':'cdn_name'}
+        res = json.loads(res)
+        upsert_lives({'subdomain':res['host'], 'domain':domain, 'ips': res['a'], 'cdn': None})
+
+    return True
+
+if __name__ == "__main__":
+    domain = sys.argv[1] if len(sys.argv) > 1 else False
+
+    if domain is False:
+        print(f"Usage: watch_brute domain")
+        sys.exit()
+
+    obj_subs = Subdomains.objects(scope=domain)
+
+    if obj_subs:
+        print(f"[{current_time()}] Running ShuffleDNS module for '{domain}'")
+        brute_force([obj_sub.subdomain for obj_sub in obj_subs], domain)
+        
+    else:
+        print(f"[{current_time()}] scope {domain} does not exist!")
+
+

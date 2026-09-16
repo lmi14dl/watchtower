@@ -1,0 +1,24 @@
+# Environment
+.env
+
+# Docker
+*.pid
+*.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Data (mounted volumes)
+volumes/
+
+# Resume state
+resume.cfg
+
+# Output from runs
+output/
+```
+
