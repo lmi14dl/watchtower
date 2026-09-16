@@ -2,55 +2,57 @@
 import sys, os, subprocess, re
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import *
+from logutil import get_logger, log_info, log_error, log_success, log_warn
+
+logger = get_logger("watch_wayback")
 
 def run_command_in_bash(command):
     try:
         result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
 
         if result.returncode != 0:
-            print("Error occured:", result.stderr)
+            log_error(logger, f"Command failed: {command}")
+            log_error(logger, f"stderr: {result.stderr}")
             return False
 
         return result.stdout.splitlines()
         
     except subprocess.CalledProcessError as exc:
-        print("Status: FAIL", exc.returncode, exc.output)
+        log_error(logger, f"Command exception: {exc}")
 
 class colors:
     GRAY = "\033[90m"
     RESET = "\033[0m"
 
-def subfinder(domain):
+def waybackurls(domain):
     command = f"waybackurls {domain} | unfurl domains | sort -u"
-
-    # running commands    
-    print(f"{colors.GRAY}Executing commands: {command}{colors.RESET}")
+    log_info(logger, f"Executing: {command}")
     res = run_command_in_bash(command)
-
-    res_num = len(res) if res else 0
-    print(f"{colors.GRAY}done for {domain}, results: {res_num}{colors.RESET}")
-
+    if not res:
+        log_warn(logger, f"No results from waybackurls for {domain}")
+        return []
+    res_num = len(res)
+    log_success(logger, f"waybackurls: {res_num} results for {domain}")
     return res
 
 if __name__ == "__main__":
-    domain = sys.argv[1] if len(sys.argv) > 1 else 0
+    if len(sys.argv) < 2:
+        print("Usage: watch_wayback <domain>")
+        sys.exit(1)
 
-    if domain is False:
-        print(f"Usage: watch_wayback domain")
-        sys.exit()
-
+    domain = sys.argv[1]
     program = Programs.objects(scopes=domain).first()
 
     if program:
-        print(f"[{current_time()}] Running waybackurls module for '{domain}'")
-        subs = subfinder(domain)
-        # TODO: save in file
+        log_info(logger, f"Running waybackurls module for '{domain}' (program: {program.program_name})")
+        subs = waybackurls(domain)
 
-        # save in watchtower database
-        for sub in subs:
-            if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
-                upsert_subdomains(program.program_name, sub, 'waybackurls')
+        if subs:
+            for sub in subs:
+                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
+                    upsert_subdomains(program.program_name, sub, 'waybackurls')
+            log_success(logger, f"Upserted waybackurls results for {domain}")
+        else:
+            log_warn(logger, f"No subdomains found via waybackurls for {domain}")
     else:
-        print(f"[{current_time()}] scope {domain} does not exist!")
-
-
+        log_error(logger, f"Scope {domain} does not exist in any program!")

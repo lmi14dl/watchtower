@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-import sys, os, subprocess, tempfile, json
+import sys, os, subprocess, tempfile
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import config
-from database.db import *
+from logutil import get_logger, log_info, log_error, log_success, log_warn
+
+logger = get_logger("watch_brute")
 
 class colors:
     GRAY = "\033[90m"
@@ -11,59 +13,73 @@ class colors:
 def run_command_in_bash(command):
     try:
         result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
-
         if result.returncode != 0:
-            print("Error occured:", result.stderr)
+            log_error(logger, f"Command failed: {command}")
+            log_error(logger, f"stderr: {result.stderr}")
             return False
-
-        return result.stdout.splitlines()
-        
+        return result.stdout
     except subprocess.CalledProcessError as exc:
-        print("Status: FAIL", exc.returncode, exc.output)
+        log_error(logger, f"Command exception: {exc}")
 
 def create_tempfile(data):
     with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
         temp_file.write(data)
         return temp_file.name
 
-def create_worlist(domain):
-    with open(config().get('DNS_BRUTE_WORDLIST'), "r", encoding="utf-8") as infile, \
+def create_wordlist(domain):
+    wordlist_path = config().get('DNS_BRUTE_WORDLIST')
+    with open(wordlist_path, "r", encoding="utf-8") as infile, \
         tempfile.NamedTemporaryFile(delete=False, mode='w') as output_file:
-            for line in infile:
-                word = line.strip()
-                if word:
-                    output_file.write(f"{word}.{domain}\n")
-            return output_file.name
-
+        for line in infile:
+            word = line.strip()
+            if word:
+                output_file.write(f"{word}.{domain}\n")
+        return output_file.name
 
 def brute_force(subdomains_array, domain):
-
-    word_list = create_worlist(domain)
+    word_list = create_wordlist(domain)
     command = f"shuffledns -list {word_list} -silent -d {domain} -mode resolve -r {config()['RESOLVERS_PATH']} -m $(which massdns) -t 30 -silent | dnsx -silent -a -resp -json -r {config()['RESOLVERS_PATH']}"
-
-    print(f"{colors.GRAY}Executing commands: {command}{colors.RESET}")
+    log_info(logger, f"Executing brute force: {command}")
     results = run_command_in_bash(command)
-    for res in results:
-        # TODO: check if IP belongs to cdn or not, if yes then skip, if no add {'cdn':'cdn_name'}
-        res = json.loads(res)
-        upsert_lives({'subdomain':res['host'], 'domain':domain, 'ips': res['a'], 'cdn': None})
 
+    if not results or results is False:
+        log_warn(logger, f"No results from brute force for {domain}")
+        os.unlink(word_list)
+        return True
+
+    count = 0
+    for line in results.splitlines() if isinstance(results, str) else results:
+        if not line or not line.strip():
+            continue
+        try:
+            import json
+            res = json.loads(line)
+            from database.db import upsert_lives
+            upsert_lives({
+                'subdomain': res['host'],
+                'domain': domain,
+                'ips': res.get('a', []),
+                'cdn': None
+            })
+            count += 1
+        except Exception as e:
+            log_error(logger, f"Failed to parse brute force result: {e}")
+
+    log_success(logger, f"Brute force: {count} live hosts for {domain}")
+    os.unlink(word_list)
     return True
 
 if __name__ == "__main__":
-    domain = sys.argv[1] if len(sys.argv) > 1 else False
+    if len(sys.argv) < 2:
+        print("Usage: watch_brute <domain>")
+        sys.exit(1)
 
-    if domain is False:
-        print(f"Usage: watch_brute domain")
-        sys.exit()
-
+    domain = sys.argv[1]
+    from database.db import Subdomains
     obj_subs = Subdomains.objects(scope=domain)
 
     if obj_subs:
-        print(f"[{current_time()}] Running ShuffleDNS module for '{domain}'")
+        log_info(logger, f"Running ShuffleDNS brute force module for '{domain}'")
         brute_force([obj_sub.subdomain for obj_sub in obj_subs], domain)
-        
     else:
-        print(f"[{current_time()}] scope {domain} does not exist!")
-
-
+        log_warn(logger, f"No subdomains found for scope {domain}")

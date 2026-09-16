@@ -20,5 +20,9 @@ resume.cfg
 
 # Output from runs
 output/
-```
+
+# Scheduler state and logs
+scheduler_state.json
+logs/
+scheduler_cron.log
 

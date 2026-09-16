@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-import sys, os, subprocess, tempfile, json
+import sys, os, subprocess, tempfile
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import config
 from database.db import *
+from logutil import get_logger, log_info, log_error, log_success, log_warn
+
+logger = get_logger("watch_nuclei_all")
 
 class colors:
     # Reset
@@ -21,27 +24,26 @@ class colors:
 
 
 def send_discord_message(message):
-    data = {
-        "content": message
-    }
-    response = requests.post(config().get('WEBHOOK_URL'), json=data)
-    if response.status_code == 204:
-        pass
-    else:
-        print(response.status_code)
+    data = {"content": message}
+    try:
+        response = requests.post(config().get('WEBHOOK_URL'), json=data)
+        if response.status_code == 204:
+            pass
+        else:
+            log_error(logger, f"Discord webhook returned status {response.status_code}")
+    except Exception as e:
+        log_error(logger, f"Failed to send Discord message: {e}")
 
 def run_command_in_bash(command):
     try:
         result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
-
         if result.returncode != 0:
-            print("Error occured:", result.stderr)
+            log_error(logger, f"Command failed: {command}")
+            log_error(logger, f"stderr: {result.stderr}")
             return False
-
         return result.stdout
-        
     except subprocess.CalledProcessError as exc:
-        print("Status: FAIL", exc.returncode, exc.output)
+        log_error(logger, f"Command exception: {exc}")
 
 def create_tempfile(data):
     with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
@@ -51,37 +53,35 @@ def create_tempfile(data):
 def nuclei(urls):
     urls_file = create_tempfile("\n".join(urls) + "\n")
 
-    # Use templates.txt for the list of templates, pass config for headers/exclusions
     templates_file = config().get('WATCH_DIR') + '/nuclei/templates.txt'
     nuclei_config = config().get('WATCH_DIR') + '/nuclei/public-config.yaml'
 
-    command = f"nuclei -l {urls_file} -config {nuclei_config}"
+    command = f"nuclei -l {urls_file} -config {nuclei_config} -silent"
 
-    # If templates.txt exists, use it as the template list
     if os.path.exists(templates_file):
-        # Convert line-delimited template list to comma-separated -t arguments
-        # or use -t with the file via -list-templates flag
-        command = f"nuclei -l {urls_file} -config {nuclei_config} -t {templates_file}"
+        command = f"nuclei -l {urls_file} -config {nuclei_config} -t {templates_file} -silent"
 
-    print(f"{colors.GRAY}Executing: {command}{colors.RESET}")
+    log_info(logger, f"Executing: {command}")
     results = run_command_in_bash(command)
 
     if results and results != '':
         send_discord_message(results)
-        print(f"{colors.GREEN}Nuclei scan complete. Results sent to Discord.{colors.RESET}")
+        log_success(logger, f"Nuclei scan complete. {len(results.splitlines())} findings sent to Discord.")
     elif results is False:
-        print(f"{colors.RED}Nuclei scan failed{colors.RESET}")
+        log_error(logger, "Nuclei scan failed")
     else:
-        print(f"{colors.GRAY}No nuclei findings{colors.RESET}")
+        log_info(logger, "No nuclei findings")
 
-    # Cleanup temp file
     os.unlink(urls_file)
     return True
 
 if __name__ == "__main__":
+    log_step(logger, "Starting Nuclei vulnerability scan")
+
     https_obj = HTTP.objects().all()
     if https_obj:
-        print(f"[{current_time()}] Running Nuclei module for all http services")
-        nuclei([http_obj.url for http_obj in https_obj])
+        urls = [http_obj.url for http_obj in https_obj if http_obj.url]
+        log_info(logger, f"Running Nuclei against {len(urls)} HTTP services")
+        nuclei(urls)
     else:
-        print(f"[{current_time()}] No HTTP services found in database")
+        log_warn(logger, "No HTTP services found in database")

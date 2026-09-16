@@ -4,6 +4,10 @@ from mongoengine import Document, StringField, DateTimeField, ListField, DictFie
 from datetime import datetime
 from config import config
 import tldextract, requests
+from logutil import get_logger, log_info, log_error, log_success, log_phase
+
+# Module logger
+logger = get_logger("database")
 
 def current_time():
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -16,16 +20,21 @@ def send_discord_message(message):
     data = {
         "content": message
     }
-    response = requests.post(config().get('WEBHOOK_URL'), json=data)
-    if response.status_code == 204:
-        pass
-    else:
-        print(response.status_code)
+    try:
+        response = requests.post(config().get('WEBHOOK_URL'), json=data)
+        if response.status_code == 204:
+            pass
+        else:
+            log_error(logger, f"Discord webhook returned status {response.status_code}")
+    except Exception as e:
+        log_error(logger, f"Failed to send Discord message: {e}")
 
 
 _MONGO_HOST = os.environ.get('MONGO_HOST', '127.0.0.1')
 _MONGO_PORT = os.environ.get('MONGO_PORT', '27017')
+log_info(logger, f"Connecting to MongoDB at {_MONGO_HOST}:{_MONGO_PORT}")
 connect('watchtower', host=f'mongodb://{_MONGO_HOST}:{_MONGO_PORT}/watchtower')
+log_success(logger, "MongoDB connection established")
 
 class Programs(Document):
     program_name = StringField(required=True)
@@ -93,15 +102,20 @@ class HTTP(Document):
 
 def upsert_lives(obj):
     program = Programs.objects(scopes=obj['domain']).first()
-    # print(program.program_name)
+    if not program:
+        log_error(logger, f"No program found for scope {obj['domain']}")
+        return
+
     existing = LiveSubdomains.objects(subdomain=obj['subdomain']).first()
 
     if existing:
-        obj['ips'].sort()
-        existing.ips.sort()
-        if obj['ips'] != existing.ips:
-            existing.ips = obj['ips']
-            print(f"[{current_time()}] Updated live subdomain: {obj['subdomain']}")
+        obj_ips = list(obj.get('ips', []))
+        obj_ips.sort()
+        existing_ips = list(existing.ips)
+        existing_ips.sort()
+        if obj_ips != existing_ips:
+            log_info(logger, f"Updated live subdomain: {obj['subdomain']} IPs changed")
+            existing.ips = obj_ips
         existing.last_update = datetime.now()
         existing.save()
 
@@ -110,47 +124,45 @@ def upsert_lives(obj):
             program_name=program.program_name,
             subdomain=obj['subdomain'],
             scope=obj['domain'],
-            ips=obj['ips'],
+            ips=obj.get('ips', []),
             created_date=datetime.now(),
             last_update=datetime.now(),
             cdn=None
         )
         
         new_live.save()
-        send_discord_message(f"""
-        ```'{obj['subdomain']}' (fresh live) has been added to '{program.program_name}' program```
-        """)
-        print(f"[{current_time()}] Inserted new live subdomain: {obj['subdomain']} for program: {program.program_name}")
+        send_discord_message(f"```\n'{obj['subdomain']}' (fresh live) has been added to '{program.program_name}' program\n```")
+        log_success(logger, f"Inserted new live subdomain: {obj['subdomain']} for program: {program.program_name}")
         
-
 def upsert_http(obj):
-    # {'subdomain': 'api.voorivex.academy', 'scope': 'voorivex.academy', 'ips': ['188.114.97.2', '188.114.96.2'], 'tech': ['Cloudflare', 'Express', 'HTTP/3', 'Node.js'], 'title': '', 'status_code': 404, 'headers': {'access_control_allow_credentials': 'true', 'access_control_allow_origin': '*', 'alt_svc': 'h3=":443"; ma=86400', 'cf_cache_status': 'DYNAMIC', 'cf_ray': 'a23d82e9cc580f1e-CDG', 'content_type': 'application/json; charset=utf-8', 'date': 'Fri, 31 Jul 2026 15:07:12 GMT', 'etag': 'W/"3f-BunLb98SCK6azHy0RO08GDnFBek"', 'nel': '{"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}', 'report_to': '{"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=WpIAMSX1PvCJwV3xNgHW6xFLLtVq2hzI5plX0wIZlLfipsGu6SMrsyeCvmLbMaHJvfCB2zA%2BovRrI3K10CQtYw1Nymf50WnG9RnN%2BG4bhTvsx3tYSotFyDKVGovAFJVZSbgmZffrIA%3D%3D"}]}', 'server': 'cloudflare', 'x_powered_by': 'Express'}, 'url': 'https://api.voorivex.academy:443', 'final_url': '', 'favicon_md5': ''}
     program = Programs.objects(scopes=obj['scope']).first()
+    if not program:
+        log_error(logger, f"No program found for scope {obj['scope']}")
+        return
+
     existing = HTTP.objects(subdomain=obj['subdomain']).first()
 
     if existing:
+        title_changed = existing.title != obj.get('title')
+        status_changed = existing.status_code != str(obj.get('status_code'))
+        favicon_changed = existing.favicon != obj.get('favicon')
 
-        if existing.title != obj.get('title'):
-            send_discord_message(f"""
-            ```'{obj['subdomain']}' Title has been changed from '{obj.get('title')}' to '{existing.title}' ```
-            """)
-            print(f"[{current_time()}] Changes Title for subdomain: {obj['subdomain']}")
+        if title_changed:
+            send_discord_message(f"```\n'{obj['subdomain']}' Title has been changed from '{existing.title}' to '{obj.get('title')}'\n```")
+            log_info(logger, f"Title changed for subdomain: {obj['subdomain']}")
             existing.title = obj.get('title')
            
-        if existing.status_code != str(obj.get('status_code')):
-            send_discord_message(f"""
-            ```'{obj['subdomain']}' Status Code has been changed from '{obj.get('status_code')}' to '{existing.status_code}'```
-            """)
-            print(f"[{current_time()}] Changes Status Code for subdomain: {obj['subdomain']}")
+        if status_changed:
+            send_discord_message(f"```\n'{obj['subdomain']}' Status Code has been changed from '{existing.status_code}' to '{str(obj.get('status_code'))}'\n```")
+            log_info(logger, f"Status Code changed for subdomain: {obj['subdomain']}")
             existing.status_code = str(obj.get('status_code'))
 
-        if existing.favicon != obj.get('favicon'):
-            send_discord_message(f"""
-            ```'{obj['subdomain']}' favhash has been changed from '{obj.get('favicon')}' to '{existing.favicon}'```
-            """)
-            print(f"[{current_time()}] Changes favhash for subdomain: {obj['subdomain']}")
+        if favicon_changed:
+            send_discord_message(f"```\n'{obj['subdomain']}' favicon has been changed from '{existing.favicon}' to '{obj.get('favicon')}'\n```")
+            log_info(logger, f"Favicon changed for subdomain: {obj['subdomain']}")
             existing.favicon = obj.get('favicon')
            
+
         existing.ips = obj.get('ips')
         existing.tech = str(obj.get('tech'))
         existing.headers = obj.get('headers')
@@ -178,25 +190,20 @@ def upsert_http(obj):
         )
         
         new_http_subdomain.save()
-        send_discord_message(f"""
-        ```'{obj['subdomain']}' (fresh http) has been added to '{program.program_name}' program```
-        """)
-        print(f"[{current_time()}] Inserted new http service: {obj['subdomain']} for program: {program.program_name}")
+        send_discord_message(f"```\n'{obj['subdomain']}' (fresh http) has been added to '{program.program_name}' program\n```")
+        log_success(logger, f"Inserted new http service: {obj['subdomain']} for program: {program.program_name}")
         
-
 
 # Upsert (Update and Insert) Programs
 def upsert_program(program_name, scopes, ooscopes, config):
     program = Programs.objects(program_name=program_name).first()
     if program:
-        # Update existing program fields
         program.config = config
         program.scopes = scopes
         program.ooscopes = ooscopes
         program.save()
-        print(f"[{current_time()}] Updated program: {program.program_name}")
+        log_info(logger, f"Updated program: {program.program_name}")
     else:
-        # Create new program
         new_program = Programs(
             program_name=program_name,
             created_date=datetime.now,
@@ -205,17 +212,18 @@ def upsert_program(program_name, scopes, ooscopes, config):
             ooscopes=ooscopes
         )
         new_program.save()
-        print(f"[{current_time()}] Inserted new program {new_program.program_name}")
+        log_success(logger, f"Inserted new program: {new_program.program_name}")
 
 # Upsert subdomains (check if subdomain exists, if not insert, if yes update providers)
 def upsert_subdomains(program_name, subdomain_name, provider):
     program = Programs.objects(program_name=program_name).first()
+    if not program:
+        log_error(logger, f"Program '{program_name}' not found for subdomain: {subdomain_name}")
+        return False
 
     if get_domain_name(subdomain_name) not in program.scopes or subdomain_name in program.ooscopes:
-        print(f"[{current_time()}] subdomain is not in scope: {subdomain_name}")
+        log_info(logger, f"Subdomain not in scope: {subdomain_name}")
         return True
-
-    # TODO: check if subdomain exist or not, filter: domain.tld
 
     existing = Subdomains.objects(program_name=program_name, subdomain=subdomain_name).first()
     if existing:
@@ -223,9 +231,8 @@ def upsert_subdomains(program_name, subdomain_name, provider):
             existing.providers.append(provider)
             existing.last_update = datetime.now()
             existing.save()
-            print(f"[{current_time()}] Updated subdomain: {subdomain_name}")
-        else:
-            pass
+            log_info(logger, f"Updated subdomain providers: {subdomain_name}")
+        # else: provider already recorded, no change needed
     else:
         new_subdomains = Subdomains(
             program_name = program_name,
@@ -236,4 +243,5 @@ def upsert_subdomains(program_name, subdomain_name, provider):
             last_update = datetime.now()
         )
         new_subdomains.save()
-        print(f"[{current_time()}] Insterted new subdomains: {subdomain_name}")
+        log_success(logger, f"Inserted new subdomain: {subdomain_name}")
+    return True

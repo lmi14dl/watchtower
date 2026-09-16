@@ -2,30 +2,36 @@
 import sys, os, subprocess, re
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import *
-import psycopg2
-from psycopg2 import OperationalError
-import time
+from logutil import get_logger, log_info, log_error, log_success, log_warn
+
+logger = get_logger("watch_crtsh")
 
 def run_command_in_bash(command):
     try:
         result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
 
         if result.returncode != 0:
-            print("Error occured:", result.stderr)
+            log_error(logger, f"Command failed: {command}")
+            log_error(logger, f"stderr: {result.stderr}")
             return False
 
         return result.stdout.splitlines()
         
     except subprocess.CalledProcessError as exc:
-        print("Status: FAIL", exc.returncode, exc.output)
+        log_error(logger, f"Command exception: {exc}")
 
 class colors:
     GRAY = "\033[90m"
     RESET = "\033[0m"
 
 def crtsh(domain, retries=3):
+    import psycopg2
+    from psycopg2 import OperationalError
+    import time
+
     for attempt in range(retries):
         try:
+            log_info(logger, f"crt.sh query attempt {attempt + 1}/{retries} for {domain}")
             conn = psycopg2.connect(
                 host="crt.sh",
                 port=5432,
@@ -47,40 +53,40 @@ def crtsh(domain, retries=3):
                 if name:
                     name = name.strip().replace(" ", "").lower()
                     if name.endswith("." + domain):
-                        names.add(name.lstrip("*."))
+                        names.add(name.lstrip("."))
             cur.close()
             conn.close()
             res = sorted(names)
             res_num = len(res) if res else 0
-            print(f"{colors.GRAY}done for {domain}, results: {res_num}{colors.RESET}")
+            log_success(logger, f"crt.sh: {res_num} results for {domain}")
             return res
 
         except OperationalError as e:
             if attempt < retries - 1:
+                log_warn(logger, f"crt.sh connection failed, retrying in 2s: {e}")
                 time.sleep(2)
                 continue
+            log_error(logger, f"crt.sh failed after {retries} attempts: {e}")
             raise e
 
-
 if __name__ == "__main__":
-    domain = sys.argv[1] if len(sys.argv) > 1 else 0
+    if len(sys.argv) < 2:
+        print("Usage: watch_crtsh <domain>")
+        sys.exit(1)
 
-    if domain is False:
-        print(f"Usage: watch_subfinder domain")
-        sys.exit()
-
+    domain = sys.argv[1]
     program = Programs.objects(scopes=domain).first()
 
     if program:
-        print(f"[{current_time()}] Running crtsh module for '{domain}'")
+        log_info(logger, f"Running crt.sh module for '{domain}' (program: {program.program_name})")
         subs = crtsh(domain)
-        # TODO: save in file
 
-        # save in watchtower database
-        for sub in subs:
-            if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
-                upsert_subdomains(program.program_name, sub, 'crtsh')
+        if subs:
+            for sub in subs:
+                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
+                    upsert_subdomains(program.program_name, sub, 'crtsh')
+            log_success(logger, f"Upserted crt.sh results for {domain}")
+        else:
+            log_warn(logger, f"No subdomains found via crt.sh for {domain}")
     else:
-        print(f"[{current_time()}] scope {domain} does not exist!")
-
-
+        log_error(logger, f"Scope {domain} does not exist in any program!")

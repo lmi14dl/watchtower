@@ -68,6 +68,9 @@ docker compose run --rm watchtower nuclei_all
 # Start the API server (FastAPI with auto docs at /docs)
 docker compose --profile api-server up -d
 
+# API requires auth: add -u user:pass
+curl -u admin:changeme http://localhost:5000/api/programs/all
+
 # View logs
 docker compose logs -f
 
@@ -75,8 +78,79 @@ docker compose logs -f
 docker compose run --rm watchtower bash
 ```
 
+## Scheduler (cron-like automation)
+
+The scheduler runs the full watchtower pipeline at a configurable frequency.
+
+### Run continuously in foreground (best inside Docker):
+```bash
+# Run 2 times a day (every 12 hours) locally
+python3 scheduler.py --runs 2
+
+# Run 4 times a day (every 6 hours)
+python3 scheduler.py --runs 4
+
+# Run every 8 hours
+python3 scheduler.py --interval 8
+
+# Run once immediately
+python3 scheduler.py --once
+
+# Run in Docker mode (uses docker compose internally)
+python3 scheduler.py --runs 2 --docker
+
+# Run only a specific phase
+python3 scheduler.py --runs 2 --phase enum_all
+```
+
+### Install as a system cron job:
+```bash
+# Install cron that runs 2x/day via docker compose
+python3 scheduler.py --install-cron --runs 2 --docker
+
+# Remove the cron job
+python3 scheduler.py --remove-cron
+
+# Check scheduler status
+python3 scheduler.py --status
+```
+
+### Running the scheduler in Docker (recommended):
+
+Add a scheduler entry to docker-compose.yml:
+```yaml
+  scheduler:
+    build: .
+    container_name: watchtower-scheduler
+    restart: unless-stopped
+    depends_on:
+      - mongo
+    env_file: .env
+    environment:
+      - MONGO_HOST=mongo
+      - PYTHONPATH=/app
+    volumes:
+      - ./volumes:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock  # needs Docker-in-Docker
+    command: ["scheduler", "--runs", "2", "--docker"]
+```
+
+Or run it as a long-running container:
+```bash
+docker compose run --rm watchtower scheduler --runs 2
+```
+
+### Available phases:
+- `all` (default) — sync_programs → enum_all → ns_all → httpx_all → nuclei_all
+- `sync_programs` — only sync program JSON files
+- `enum_all` — only subdomain enumeration
+- `ns_all` — only DNS resolution
+- `httpx_all` — only HTTP probing
+- `nuclei_all` — only vulnerability scanning
+
 ## APIs
-### All endpoints support OpenAPI docs at `/docs` and `/redoc`
+### All endpoints require HTTP Basic Auth (username:password from .env)
+### Auto-generated docs at `/docs` and `/redoc` (also auth-protected)
 
 ### Programs
 - get all programs: `/api/programs/all`

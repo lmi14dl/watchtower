@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi import FastAPI, HTTPException, Query, Path, Depends
 from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.security import HTTPBasic
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -9,12 +10,26 @@ from database.db import (
     Programs, Subdomains, LiveSubdomains, HTTP,
     current_time, get_domain_name
 )
+from logutil import get_logger, log_info, log_error, log_success, log_warn
+from auth import authenticate
+
+logger = get_logger("fastapi")
+log_info(logger, "Watchtower API starting up")
+
+security = HTTPBasic()
 
 app = FastAPI(
     title="Watchtower API",
-    description="Bug bounty watchtower API for tracking subdomains, live hosts, and HTTP services across bug bounty programs.",
+    description="Bug bounty watchtower API for tracking subdomains, live hosts, and HTTP services across bug bounty programs. Requires HTTP Basic Auth on all endpoints except / and /health.",
     version="1.0.0"
 )
+
+@app.middleware("http")
+async def log_requests(request, call_next):
+    """Log every incoming API request"""
+    response = await call_next(request)
+    log_info(logger, f"{request.method} {request.url.path} -> {response.status_code}")
+    return response
 
 
 @app.get("/")
@@ -25,7 +40,7 @@ async def root():
 # --- Programs ---
 
 @app.get("/api/programs/all")
-async def all_programs():
+async def all_programs(user: dict = Depends(authenticate)):
     programs = Programs.objects.all()
     response = {}
     for program in programs:
@@ -39,7 +54,7 @@ async def all_programs():
 
 
 @app.get("/api/programs/{program_name}")
-async def get_program(program_name: str = Path(..., description="Program name to look up")):
+async def get_program(program_name: str = Path(..., description="Program name to look up"), user: dict = Depends(authenticate)):
     program = Programs.objects(program_name=program_name).first()
     if not program:
         raise HTTPException(status_code=404, detail=f"Program '{program_name}' not found")
@@ -57,7 +72,8 @@ async def get_program(program_name: str = Path(..., description="Program name to
 @app.get("/api/subdomains/all")
 async def all_subdomains(
     limit: int = Query(default=1000, le=10000),
-    provider: Optional[str] = Query(default=None, description="Filter by provider (e.g. subfinder, crtsh)")
+    provider: Optional[str] = Query(default=None, description="Filter by provider (e.g. subfinder, crtsh)"),
+    user: dict = Depends(authenticate),
 ):
     query = Subdomains.objects()
     if provider:
@@ -76,7 +92,7 @@ async def all_subdomains(
 
 
 @app.get("/api/subdomains/domain/{domain}")
-async def subdomains_of_domain(domain: str = Path(...)):
+async def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(authenticate)):
     subs = Subdomains.objects(scope=domain).all()
     if not subs:
         return {"message": f"No subdomains found for {domain}"}
@@ -93,7 +109,7 @@ async def subdomains_of_domain(domain: str = Path(...)):
 
 
 @app.get("/api/subdomains/program/{p_name}")
-async def subdomains_of_program(p_name: str = Path(...)):
+async def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(authenticate)):
     subs = Subdomains.objects(program_name=p_name).all()
     if not subs:
         return {"message": f"No subdomains found for program '{p_name}'"}, 404
@@ -113,7 +129,8 @@ async def subdomains_of_program(p_name: str = Path(...)):
 
 @app.get("/api/lives/all")
 async def all_lives(
-    hours: int = Query(default=12, description="Look back this many hours")
+    hours: int = Query(default=12, description="Look back this many hours"),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     live_subs = LiveSubdomains.objects(last_update__gte=ago).all()
@@ -134,7 +151,8 @@ async def all_lives(
 @app.get("/api/lives/program/{p_name}")
 async def lives_of_program(
     p_name: str = Path(...),
-    hours: int = Query(default=12)
+    hours: int = Query(default=12),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     live_subs = LiveSubdomains.objects(program_name=p_name, last_update__gte=ago).all()
@@ -156,7 +174,8 @@ async def lives_of_program(
 @app.get("/api/lives/domain/{domain}")
 async def lives_of_domain(
     domain: str = Path(...),
-    hours: int = Query(default=12)
+    hours: int = Query(default=12),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     live_subs = LiveSubdomains.objects(scope=domain, last_update__gte=ago).all()
@@ -177,7 +196,8 @@ async def lives_of_domain(
 
 @app.get("/api/lives/fresh")
 async def fresh_lives(
-    hours: int = Query(default=24, description="Hours to look back for fresh subdomains")
+    hours: int = Query(default=24, description="Hours to look back for fresh subdomains"),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     fresh = LiveSubdomains.objects(created_date__gte=ago).all()
@@ -188,7 +208,8 @@ async def fresh_lives(
 @app.get("/api/lives/provider/{provider}")
 async def lives_of_provider(
     provider: str = Path(...),
-    hours: int = Query(default=12)
+    hours: int = Query(default=12),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     subs_obj = Subdomains.objects(providers=provider).all()
@@ -203,7 +224,7 @@ async def lives_of_provider(
 
 
 @app.get("/api/lives/subdomain/{live}")
-async def live_sub_detail(live: str = Path(...)):
+async def live_sub_detail(live: str = Path(...), user: dict = Depends(authenticate)):
     live_obj = LiveSubdomains.objects(subdomain=live).first()
     sub_obj = Subdomains.objects(subdomain=live).first()
     if live_obj and sub_obj:
@@ -226,7 +247,8 @@ async def live_sub_detail(live: str = Path(...)):
 @app.get("/api/http/all")
 async def all_http(
     hours: int = Query(default=12),
-    limit: int = Query(default=1000, le=10000)
+    limit: int = Query(default=1000, le=10000),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     http_records = HTTP.objects(last_update__gte=ago).limit(limit).all()
@@ -251,7 +273,7 @@ async def all_http(
 
 
 @app.get("/api/http/fresh/{hours}")
-async def http_fresh(hours: int = Path(..., description="Hours to look back")):
+async def http_fresh(hours: int = Path(..., description="Hours to look back"), user: dict = Depends(authenticate)):
     ago = datetime.now() - timedelta(hours=hours)
     fresh = HTTP.objects(created_date__gte=ago).all()
     res_array = [h.url for h in fresh if h.url]
@@ -261,7 +283,8 @@ async def http_fresh(hours: int = Path(..., description="Hours to look back")):
 @app.get("/api/http/provider/{provider}")
 async def http_of_provider(
     provider: str = Path(...),
-    hours: int = Query(default=12)
+    hours: int = Query(default=12),
+    user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
     subs_obj = Subdomains.objects(providers=provider).all()
@@ -276,7 +299,7 @@ async def http_of_provider(
 
 
 @app.get("/api/http/subdomain/{subdomain}")
-async def http_of_subdomain(subdomain: str = Path(...)):
+async def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(authenticate)):
     http_records = HTTP.objects(subdomain=subdomain).all()
     if not http_records:
         return {"message": f"No HTTP services found for subdomain '{subdomain}'"}, 404

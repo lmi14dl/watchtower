@@ -3,17 +3,26 @@ set -e
 
 # Docker entrypoint for Watchtower
 # Usage:
-#   docker compose up -d  (runs full pipeline via CMD)
+#   docker compose up -d  (runs full pipeline via CMD: ["all"])
 #   docker compose run --rm watchtower sync_programs
-#   docker compose run --rm watchtower enum_all walmart.com
+#   docker compose run --rm watchtower enum_all
 #   docker compose run --rm watchtower ns_all
 #   docker compose run --rm watchtower httpx_all
 #   docker compose run --rm watchtower nuclei_all
+#   docker compose run --rm watchtower enum_single example.com
+#   docker compose run --rm watchtower httpx_single example.com
+#   docker compose run --rm watchtower scheduler --runs 2 --docker
 #   docker compose run --rm watchtower api
+#   docker compose run --rm watchtower bash
 
 export PYTHONPATH=/app:${PYTHONPATH}
 
 case "$1" in
+    scheduler)
+        # Pass all remaining args to scheduler.py
+        shift
+        exec python3 /app/scheduler.py "$@"
+        ;;
     all)
         echo "=== Running full Watchtower pipeline ==="
         echo "[$(date -Iseconds)] Phase 1: Sync programs"
@@ -87,7 +96,7 @@ case "$1" in
         exec /bin/bash
         ;;
     *)
-        echo "Usage: $0 {all|sync_programs|enum_all|enum_single <domain>|ns_all|ns_single <domain>|brute_single <domain>|httpx_all|httpx_single <domain>|nuclei_all|api|bash}"
+        echo "Usage: $0 {all|sync_programs|enum_all|enum_single <domain>|ns_all|ns_single <domain>|brute_single <domain>|httpx_all|httpx_single <domain>|nuclei_all|scheduler <args>|api|bash}"
         exit 1
         ;;
 esac
