@@ -4,7 +4,8 @@ from mongoengine import Document, StringField, DateTimeField, ListField, DictFie
 from datetime import datetime
 from config import config
 import tldextract, requests
-from logutil import get_logger, log_info, log_error, log_success, log_phase
+from logutil import get_logger, log_info, log_error, log_success
+from notifier import notify, get_enabled_services
 
 # Module logger
 logger = get_logger("database")
@@ -16,18 +17,13 @@ def get_domain_name(url):
     ext = tldextract.extract(url)
     return f"{ext.domain}.{ext.suffix}"
 
-def send_discord_message(message):
-    data = {
-        "content": message
-    }
-    try:
-        response = requests.post(config().get('WEBHOOK_URL'), json=data)
-        if response.status_code == 204:
-            pass
-        else:
-            log_error(logger, f"Discord webhook returned status {response.status_code}")
-    except Exception as e:
-        log_error(logger, f"Failed to send Discord message: {e}")
+def notify_all(message):
+    """Send notification to all configured services."""
+    services = get_enabled_services()
+    if not services:
+        log_warn(logger, "No notification services configured, skipping notification")
+        return
+    notify(message)
 
 
 _MONGO_HOST = os.environ.get('MONGO_HOST', '127.0.0.1')
@@ -35,6 +31,13 @@ _MONGO_PORT = os.environ.get('MONGO_PORT', '27017')
 log_info(logger, f"Connecting to MongoDB at {_MONGO_HOST}:{_MONGO_PORT}")
 connect('watchtower', host=f'mongodb://{_MONGO_HOST}:{_MONGO_PORT}/watchtower')
 log_success(logger, "MongoDB connection established")
+
+# Log which notification services are active
+services = get_enabled_services()
+if services:
+    log_info(logger, f"Notifications enabled for: {', '.join(services)}")
+else:
+    log_warn(logger, "No notification services configured (set DISCORD_WEBHOOK_URL and/or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID)")
 
 class Programs(Document):
     program_name = StringField(required=True)
@@ -131,7 +134,7 @@ def upsert_lives(obj):
         )
         
         new_live.save()
-        send_discord_message(f"```\n'{obj['subdomain']}' (fresh live) has been added to '{program.program_name}' program\n```")
+        notify_all(f"```{obj['subdomain']} (fresh live) has been added to '{program.program_name}' program```")
         log_success(logger, f"Inserted new live subdomain: {obj['subdomain']} for program: {program.program_name}")
         
 def upsert_http(obj):
@@ -148,17 +151,17 @@ def upsert_http(obj):
         favicon_changed = existing.favicon != obj.get('favicon')
 
         if title_changed:
-            send_discord_message(f"```\n'{obj['subdomain']}' Title has been changed from '{existing.title}' to '{obj.get('title')}'\n```")
+            notify_all(f"```{obj['subdomain']} Title has been changed from '{existing.title}' to '{obj.get('title')}'```")
             log_info(logger, f"Title changed for subdomain: {obj['subdomain']}")
             existing.title = obj.get('title')
            
         if status_changed:
-            send_discord_message(f"```\n'{obj['subdomain']}' Status Code has been changed from '{existing.status_code}' to '{str(obj.get('status_code'))}'\n```")
+            notify_all(f"```{obj['subdomain']} Status Code has been changed from '{existing.status_code}' to '{str(obj.get('status_code'))}'```")
             log_info(logger, f"Status Code changed for subdomain: {obj['subdomain']}")
             existing.status_code = str(obj.get('status_code'))
 
         if favicon_changed:
-            send_discord_message(f"```\n'{obj['subdomain']}' favicon has been changed from '{existing.favicon}' to '{obj.get('favicon')}'\n```")
+            notify_all(f"```{obj['subdomain']} favicon has been changed from '{existing.favicon}' to '{obj.get('favicon')}'```")
             log_info(logger, f"Favicon changed for subdomain: {obj['subdomain']}")
             existing.favicon = obj.get('favicon')
            
@@ -190,7 +193,7 @@ def upsert_http(obj):
         )
         
         new_http_subdomain.save()
-        send_discord_message(f"```\n'{obj['subdomain']}' (fresh http) has been added to '{program.program_name}' program\n```")
+        notify_all(f"```{obj['subdomain']} (fresh http) has been added to '{program.program_name}' program```")
         log_success(logger, f"Inserted new http service: {obj['subdomain']} for program: {program.program_name}")
         
 

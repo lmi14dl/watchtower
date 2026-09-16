@@ -4,10 +4,14 @@ welcome to my watchtower : ]
 ## setup the watchtower
 
 ### Option A: Docker (recommended)
-1. Copy `.env.example` to `.env` and fill in your Discord webhook:
+1. Copy `.env.example` to `.env` and fill in your credentials:
 ```bash
 cp .env.example .env
 ```
+Fill in:
+- `DISCORD_WEBHOOK_URL` (optional)
+- `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` (optional)
+- `WATCHTOWER_API_PASS` (change the default password!)
 2. Mount your local tool data (resolvers, wordlists, nuclei templates) under `volumes/`:
 ```bash
 mkdir -p volumes/{resolvers,wordlists,nuclei-templates,gau-config}
@@ -194,3 +198,36 @@ docker compose run --rm watchtower scheduler --runs 2
 - chaos (needs API key)
 - waybackurls
 - unfurl
+
+## Notifications
+
+Watchtower supports notifications via Discord and Telegram. Both are optional — configure whichever you use.
+
+### Discord
+Set `DISCORD_WEBHOOK_URL` in your `.env` file. Notifications are sent as webhook messages.
+
+### Telegram
+Set both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in your `.env`. Create a bot via @BotFather and get your chat ID from @userinfobot.
+
+### What gets notified
+- New live subdomains discovered
+- New HTTP services found
+- Subdomain HTTP title/status_code/favicon changes
+- Nuclei vulnerability scan results
+- Pipeline run success/failure (from scheduler)
+
+### Test notifications
+```bash
+# Inside the container
+docker compose run --rm watchtower bash
+python3 -c "from notifier import test_notifications; print(test_notifications())"
+```
+
+### Log files
+All operations are logged to `logs/watchtower_YYYY-MM-DD.log`
+
+To check logs in Docker:
+```bash
+docker compose run --rm watchtower bash
+cat logs/watchtower_*.log
+```

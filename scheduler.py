@@ -43,7 +43,8 @@ CRON_MARKER = "# WATCHTOWER-CRON"
 
 # Setup scheduler logger
 sys.path.insert(0, SCRIPT_DIR)
-from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step, Colors
+from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step, log_phase, Colors
+from notifier import notify, get_enabled_services
 
 logger = get_logger("scheduler")
 
@@ -155,6 +156,12 @@ def schedule_run(run_count, interval_hours=None, docker_mode=False, phase="all")
         state["run_count"] += 1
         save_state(state)
 
+        # Send notification about run completion
+        services = get_enabled_services()
+        if services:
+            msg = f"Watchtower pipeline run #{state['run_count']} completed: {status}"
+            notify(msg)
+
         log_info(logger, f"Next run in {interval} hours ({interval * 3600} seconds)")
         time.sleep(interval * 3600)
 
@@ -175,6 +182,12 @@ def run_once(docker_mode=False, phase="all"):
 
     status = "OK" if success else "FAILED"
     log_info(logger, f"Run #{state['run_count']} completed: {status}")
+
+    # Send notification about run completion
+    services = get_enabled_services()
+    if services:
+        msg = f"Watchtower pipeline run #{state['run_count']} completed: {status}"
+        notify(msg)
     return success
 
 

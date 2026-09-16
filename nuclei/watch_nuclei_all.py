@@ -3,7 +3,8 @@ import sys, os, subprocess, tempfile
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import config
 from database.db import *
-from logutil import get_logger, log_info, log_error, log_success, log_warn
+from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
+from notifier import notify, get_enabled_services
 
 logger = get_logger("watch_nuclei_all")
 
@@ -23,16 +24,13 @@ class colors:
     GRAY = "\033[90m"
 
 
-def send_discord_message(message):
-    data = {"content": message}
-    try:
-        response = requests.post(config().get('WEBHOOK_URL'), json=data)
-        if response.status_code == 204:
-            pass
-        else:
-            log_error(logger, f"Discord webhook returned status {response.status_code}")
-    except Exception as e:
-        log_error(logger, f"Failed to send Discord message: {e}")
+def send_notification(message):
+    """Send notification to all configured services."""
+    services = get_enabled_services()
+    if not services:
+        log_warn(logger, "No notification services configured")
+        return
+    notify(message)
 
 def run_command_in_bash(command):
     try:
@@ -65,8 +63,8 @@ def nuclei(urls):
     results = run_command_in_bash(command)
 
     if results and results != '':
-        send_discord_message(results)
-        log_success(logger, f"Nuclei scan complete. {len(results.splitlines())} findings sent to Discord.")
+        send_notification(results)
+        log_success(logger, f"Nuclei scan complete. {len(results.splitlines())} findings sent to notifications.")
     elif results is False:
         log_error(logger, "Nuclei scan failed")
     else:

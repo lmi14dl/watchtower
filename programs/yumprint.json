@@ -1,5 +1,5 @@
 {
-    "program_name": "yumprint",
-    "scopes": ["yumprint.com","yumprint.com.au"],
+    "program_name": "vizio",
+    "scopes": ["vizio.com"],
     "ooscopes": [""]
 }
