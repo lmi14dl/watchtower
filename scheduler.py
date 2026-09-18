@@ -93,7 +93,7 @@ def run_pipeline(phase="all"):
         "enum_all": ["python3", f"{SCRIPT_DIR}/enum/watch_enum_all.py"],
         "ns_all": ["python3", f"{SCRIPT_DIR}/ns/watch_ns_all.py"],
         "httpx_all": ["python3", f"{SCRIPT_DIR}/http/watch_http_all.py"],
-        "nuclei_all": ["python3", f"{SCRIPT_DIR}/nuclei/watch_nuclei_all.py"],
+        # "nuclei_all": ["python3", f"{SCRIPT_DIR}/nuclei/watch_nuclei_all.py"],
     }
 
     if phase == "all":
