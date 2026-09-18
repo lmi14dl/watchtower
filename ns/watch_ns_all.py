@@ -3,7 +3,7 @@ import sys, os, subprocess, tempfile, json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import config
 from database.db import *
-from logutil import get_logger, log_info, log_error, log_success, log_warn
+from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
 
 logger = get_logger("watch_ns_all")
 

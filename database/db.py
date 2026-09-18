@@ -6,7 +6,7 @@ from config import config
 import tldextract, requests
 from logutil import get_logger, log_info, log_error, log_success
 from notifier import notify, get_enabled_services
-
+from logutil import log_warn
 # Module logger
 logger = get_logger("database")
 

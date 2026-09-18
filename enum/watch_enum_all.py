@@ -3,7 +3,7 @@ import sys, os, subprocess
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import *
 from config import config
-from logutil import get_logger, log_info, log_error, log_success, log_warn, log_phase
+from logutil import get_logger, log_info, log_error, log_success, log_warn, log_phase, log_step
 
 logger = get_logger("watch_enum_all")
 

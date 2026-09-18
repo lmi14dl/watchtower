@@ -12,28 +12,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Go (for subfinder, http-prober, etc.)
-ENV GOLANG_VERSION=1.22.5
-RUN curl -sSL https://go.dev/dl/go${GOLANG_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
-    && tar -C /usr/local -xzf /tmp/go.tar.gz \
-    && rm /tmp/go.tgz
+# ENV GOLANG_VERSION=1.22.5
+# RUN curl -sSL https://go.dev/dl/go${GOLANG_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
+#     && tar -C /usr/local -xzf /tmp/go.tar.gz \
+#     && rm /tmp/go.tgz
 
-ENV PATH="/usr/local/go/bin:${PATH}"
-ENV GOPATH=/root/go
-ENV PATH="${GOPATH}/bin:${PATH}"
+# ENV PATH="/usr/local/go/bin:${PATH}"
+# ENV GOPATH=/root/go
+# ENV PATH="${GOPATH}/bin:${PATH}"
 
 # Install core bug bounty tools via Go
-RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-RUN go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
-RUN go install -v github.com/timb-machine-community/massdns/cmd/massdns@latest 2>/dev/null || \
-    go install -v github.com/1hacker/massdns@latest 2>/dev/null || \
-    echo "massdns install skipped, will use apt fallback"
-RUN go install -v github.com/tomnomnom/anample/@latest 2>/dev/null || echo "gau install attempted"
-RUN go install -v github.com/tomnomnom/waybackurls@latest 2>/dev/null || go install -v github.com/tomnomnom/waybackurls/v2@latest 2>/dev/null || echo "waybackurls install attempted"
-RUN go install -v github.com/tomnomnom/unfurl@latest 2>/dev/null || echo "unfurl install attempted"
-RUN go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest 2>/dev/null || echo "chaos install skipped (needs API key)"
+# RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+# RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+# RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+# RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+# RUN go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+# RUN go install -v github.com/timb-machine-community/massdns/cmd/massdns@latest 2>/dev/null || \
+#     go install -v github.com/1hacker/massdns@latest 2>/dev/null || \
+#     echo "massdns install skipped, will use apt fallback"
+# RUN go install -v github.com/tomnomnom/anample/@latest 2>/dev/null || echo "gau install attempted"
+# RUN go install -v github.com/tomnomnom/waybackurls@latest 2>/dev/null || go install -v github.com/tomnomnom/waybackurls/v2@latest 2>/dev/null || echo "waybackurls install attempted"
+# RUN go install -v github.com/tomnomnom/unfurl@latest 2>/dev/null || echo "unfurl install attempted"
+# RUN go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest 2>/dev/null || echo "chaos install skipped (needs API key)"
 
 # Copy Python dependencies and install
 COPY req.txt /app/req.txt

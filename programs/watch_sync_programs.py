@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from database.db import upsert_program
 from config import config
-from logutil import get_logger, log_info, log_error, log_success, log_warn
+from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
 
 logger = get_logger("watch_sync_programs")
 

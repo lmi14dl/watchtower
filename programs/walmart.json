@@ -1,0 +1,5 @@
+{
+    "program_name": "walmart",
+    "scopes": ["walmart.com","walmartconnect.com","walmartstores.com","walmartchecks.com","walmartmoneycard.com"],
+    "ooscopes": [""]
+}
