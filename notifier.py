@@ -24,7 +24,9 @@ Usage:
 import os
 import requests
 from logutil import get_logger, log_info, log_error, log_success, log_warn
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = get_logger("notifier")
 
 
