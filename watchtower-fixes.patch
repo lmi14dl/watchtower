@@ -1,0 +1,2170 @@
+diff --git a/.env.example b/.env.example
+index c6f2d2d..ffd7278 100644
+--- a/.env.example
++++ b/.env.example
+@@ -24,3 +24,36 @@ MONGO_DB=watchtower
+ # Change these to strong passwords before deploying
+ WATCHTOWER_API_USER=admin
+ WATCHTOWER_API_PASS=changeme
++
++# ---------------------------------------------------------------------------
++# Resource tuning (all optional, defaults are light)
++# ---------------------------------------------------------------------------
++# nice level for every external tool (0 disables), default timeout in seconds
++WATCH_NICE=19
++WATCH_CMD_TIMEOUT=7200
++# Incremental runs: only (re)process items older than N hours
++RESOLVE_STALE_HOURS=24
++HTTP_STALE_HOURS=24
++# subfinder: set SUBFINDER_ALL=1 to use every source (heavier)
++SUBFINDER_ALL=0
++SUBFINDER_RATE_LIMIT=30
++# gau / waybackurls: cap on URLs processed per domain
++ENUM_MAX_URLS=500000
++# dnsx
++DNSX_THREADS=20
++DNSX_RATE_LIMIT=50
++# httpx: tech-detect / favicon are CPU/request heavy, opt in with 1
++HTTPX_PORTS=80,443
++HTTPX_THREADS=10
++HTTPX_RATE_LIMIT=10
++HTTPX_RETRIES=1
++HTTPX_TIMEOUT=7
++HTTPX_TECH=0
++HTTPX_FAVICON=0
++# nuclei: scan only new URLs (rescan after N days), capped per run
++NUCLEI_RESCAN_DAYS=7
++NUCLEI_MAX_URLS_PER_RUN=2000
++# NUCLEI_TEMPLATES=/app/nuclei-templates/http/exposed-panels
++# Notifications are batched; max messages per process, 1 = disable DB-level alerts
++NOTIFY_MAX_PER_RUN=200
++# WATCH_NO_NOTIFY=1
+diff --git a/Dockerfile b/Dockerfile
+index 9a87938..011d5c7 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,70 +1,41 @@
++# ---- Stage 1: build the recon tools (Go) ----
++FROM golang:bookworm AS tools
++ENV CGO_ENABLED=0 GOBIN=/out
++RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
++ && go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest \
++ && go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
++ && go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest \
++ && go install -v github.com/lc/gau/v2/cmd/gau@latest \
++ && go install -v github.com/tomnomnom/waybackurls@latest \
++ && go install -v github.com/tomnomnom/unfurl@latest
++
++# ---- Stage 2: runtime ----
+ FROM python:3.11-slim
+ 
+-# Install system dependencies for bug bounty tools
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     dnsutils \
+     curl \
+-    git \
+     jq \
+-    nmap \
+-    masscan \
+     ca-certificates \
+     && rm -rf /var/lib/apt/lists/*
+ 
+-# Install Go (for subfinder, http-prober, etc.)
+-# ENV GOLANG_VERSION=1.22.5
+-# RUN curl -sSL https://go.dev/dl/go${GOLANG_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
+-#     && tar -C /usr/local -xzf /tmp/go.tar.gz \
+-#     && rm /tmp/go.tgz
++COPY --from=tools /out/ /usr/local/bin/
+ 
+-# ENV PATH="/usr/local/go/bin:${PATH}"
+-# ENV GOPATH=/root/go
+-# ENV PATH="${GOPATH}/bin:${PATH}"
+-
+-# Install core bug bounty tools via Go
+-# RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+-# RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+-# RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+-# RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+-# RUN go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+-# RUN go install -v github.com/timb-machine-community/massdns/cmd/massdns@latest 2>/dev/null || \
+-#     go install -v github.com/1hacker/massdns@latest 2>/dev/null || \
+-#     echo "massdns install skipped, will use apt fallback"
+-# RUN go install -v github.com/tomnomnom/anample/@latest 2>/dev/null || echo "gau install attempted"
+-# RUN go install -v github.com/tomnomnom/waybackurls@latest 2>/dev/null || go install -v github.com/tomnomnom/waybackurls/v2@latest 2>/dev/null || echo "waybackurls install attempted"
+-# RUN go install -v github.com/tomnomnom/unfurl@latest 2>/dev/null || echo "unfurl install attempted"
+-# RUN go install -v github.com/projectdiscovery/chaos-client/cmd/chaos@latest 2>/dev/null || echo "chaos install skipped (needs API key)"
+-
+-# Copy Python dependencies and install
++# Python dependencies
+ COPY req.txt /app/req.txt
+ RUN pip install --no-cache-dir -r /app/req.txt
+ 
+-# Create app directory
+ WORKDIR /app
+-
+-# Copy all watchtower files
+ COPY . /app/
+ 
+-# Create config directory for nuclei templates
+-RUN nuclei -config /app/nuclei/public-config.yaml -update-templates 2>/dev/null || true
+-
+-# Copy nuclei templates list
+-RUN if [ -f /app/nuclei/templates.txt ]; then \
+-      nuclei -update-templates 2>/dev/null || true; \
+-    fi
+-
+-# Copy the nuclei private xss config
+-RUN if [ -f /app/nuclei/private_templates/xss.yaml ]; then \
+-      cp /app/nuclei/private_templates/xss.yaml /root/.config/nuclei/ 2>/dev/null || true; \
+-    fi
++# Download nuclei templates once at build time (non-fatal)
++RUN nuclei -update-templates 2>/dev/null || true
+ 
+-# Create resolvers and wordlist directories (user will mount their own)
++# Resolvers / wordlists are mounted by the user
+ RUN mkdir -p /app/config
+ 
+-# Copy entrypoint script
+ COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+ RUN chmod +x /app/docker-entrypoint.sh
+ 
+-# Default: run the full pipeline
+ ENTRYPOINT ["/app/docker-entrypoint.sh"]
+ CMD ["all"]
+diff --git a/README.md b/README.md
+index 670e7a6..8382ed7 100644
+--- a/README.md
++++ b/README.md
+@@ -82,6 +82,30 @@ docker compose logs -f
+ docker compose run --rm watchtower bash
+ ```
+ 
++## Resource usage / what changed (performance fixes)
++
++- `docker compose up -d` starts only MongoDB. The pipeline is a one-shot job and no longer restarts in a loop
++  (`restart: "no"`). Schedule it from the host cron, or use the optional scheduler container:
++  ```bash
++  # host cron (twice a day, low priority)
++  0 */12 * * * cd /opt/watchtower && nice -n 19 docker compose run --rm watchtower all
++  # or a long-running scheduler container
++  docker compose --profile scheduler up -d scheduler
++  ```
++- Containers have `cpus` / `mem_limit`; MongoDB cache is limited to 0.5 GB.
++- The Docker image now builds subfinder, httpx, dnsx, nuclei, gau, waybackurls and unfurl (multi-stage build).
++  Phases exit with an error if a required tool is missing (no more silent empty runs).
++- MongoDB: indexes on `subdomain` / `scope` / dates, bulk upserts, program lookups cached.
++  HTTP records are now keyed by URL (host+port), so ports no longer overwrite each other.
++  The legacy unique index on `HTTP(program_name, subdomain)` is dropped automatically on first start.
++- Incremental pipeline: only new/stale subdomains are resolved (`RESOLVE_STALE_HOURS`), only new/stale live hosts are
++  probed (`HTTP_STALE_HOURS`), nuclei scans only URLs never scanned (`NUCLEI_RESCAN_DAYS`).
++- dnsx is used alone (shuffledns/massdns double-resolving removed); httpx defaults to ports 80,443 without
++  tech-detect/favicon; subfinder runs without `-all`; nuclei uses `nuclei/public-config.yaml` (low rate/concurrency).
++  See `.env.example` for every knob.
++- All external tools run under `nice`, with timeouts, streaming output; notifications are batched and split to fit
++  Discord/Telegram limits; logs rotate (5 MB x 3).
++
+ ## Scheduler (cron-like automation)
+ 
+ The scheduler runs the full watchtower pipeline at a configurable frequency.
+diff --git a/app.py b/app.py
+index 1dfbf43..b16222f 100644
+--- a/app.py
++++ b/app.py
+@@ -33,14 +33,14 @@ async def log_requests(request, call_next):
+ 
+ 
+ @app.get("/")
+-async def root():
++def root():
+     return {"message": "Welcome to Watchtower API", "docs": "/docs", "redoc": "/redoc"}
+ 
+ 
+ # --- Programs ---
+ 
+ @app.get("/api/programs/all")
+-async def all_programs(user: dict = Depends(authenticate)):
++def all_programs(user: dict = Depends(authenticate)):
+     programs = Programs.objects.all()
+     response = {}
+     for program in programs:
+@@ -54,7 +54,7 @@ async def all_programs(user: dict = Depends(authenticate)):
+ 
+ 
+ @app.get("/api/programs/{program_name}")
+-async def get_program(program_name: str = Path(..., description="Program name to look up"), user: dict = Depends(authenticate)):
++def get_program(program_name: str = Path(..., description="Program name to look up"), user: dict = Depends(authenticate)):
+     program = Programs.objects(program_name=program_name).first()
+     if not program:
+         raise HTTPException(status_code=404, detail=f"Program '{program_name}' not found")
+@@ -70,7 +70,7 @@ async def get_program(program_name: str = Path(..., description="Program name to
+ # --- Subdomains ---
+ 
+ @app.get("/api/subdomains/all")
+-async def all_subdomains(
++def all_subdomains(
+     limit: int = Query(default=1000, le=10000),
+     provider: Optional[str] = Query(default=None, description="Filter by provider (e.g. subfinder, crtsh)"),
+     user: dict = Depends(authenticate),
+@@ -92,7 +92,7 @@ async def all_subdomains(
+ 
+ 
+ @app.get("/api/subdomains/domain/{domain}")
+-async def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(authenticate)):
++def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(authenticate)):
+     subs = Subdomains.objects(scope=domain).all()
+     if not subs:
+         return {"message": f"No subdomains found for {domain}"}
+@@ -109,7 +109,7 @@ async def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(aut
+ 
+ 
+ @app.get("/api/subdomains/program/{p_name}")
+-async def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(authenticate)):
++def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(authenticate)):
+     subs = Subdomains.objects(program_name=p_name).all()
+     if not subs:
+         return {"message": f"No subdomains found for program '{p_name}'"}, 404
+@@ -128,7 +128,7 @@ async def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(au
+ # --- Live Subdomains ---
+ 
+ @app.get("/api/lives/all")
+-async def all_lives(
++def all_lives(
+     hours: int = Query(default=12, description="Look back this many hours"),
+     user: dict = Depends(authenticate),
+ ):
+@@ -149,7 +149,7 @@ async def all_lives(
+ 
+ 
+ @app.get("/api/lives/program/{p_name}")
+-async def lives_of_program(
++def lives_of_program(
+     p_name: str = Path(...),
+     hours: int = Query(default=12),
+     user: dict = Depends(authenticate),
+@@ -172,7 +172,7 @@ async def lives_of_program(
+ 
+ 
+ @app.get("/api/lives/domain/{domain}")
+-async def lives_of_domain(
++def lives_of_domain(
+     domain: str = Path(...),
+     hours: int = Query(default=12),
+     user: dict = Depends(authenticate),
+@@ -195,7 +195,7 @@ async def lives_of_domain(
+ 
+ 
+ @app.get("/api/lives/fresh")
+-async def fresh_lives(
++def fresh_lives(
+     hours: int = Query(default=24, description="Hours to look back for fresh subdomains"),
+     user: dict = Depends(authenticate),
+ ):
+@@ -206,25 +206,24 @@ async def fresh_lives(
+ 
+ 
+ @app.get("/api/lives/provider/{provider}")
+-async def lives_of_provider(
++def lives_of_provider(
+     provider: str = Path(...),
+     hours: int = Query(default=12),
+     user: dict = Depends(authenticate),
+ ):
+     ago = datetime.now() - timedelta(hours=hours)
+-    subs_obj = Subdomains.objects(providers=provider).all()
+-    if not subs_obj:
++    names = list(Subdomains.objects(providers=provider).scalar('subdomain'))
++    if not names:
+         return {"message": f"The '{provider}' provider was not found"}
+-    response = ""
+-    for sub_obj in subs_obj:
+-        lives = LiveSubdomains.objects(subdomain=sub_obj.subdomain, last_update__gte=ago).first()
+-        if lives:
+-            response += f"{lives.subdomain}\n"
+-    return PlainTextResponse(response)
++    found = set()
++    for i in range(0, len(names), 5000):
++        part = names[i:i + 5000]
++        found.update(LiveSubdomains.objects(subdomain__in=part, last_update__gte=ago).scalar('subdomain'))
++    return PlainTextResponse("".join(f"{s}\n" for s in sorted(found)))
+ 
+ 
+ @app.get("/api/lives/subdomain/{live}")
+-async def live_sub_detail(live: str = Path(...), user: dict = Depends(authenticate)):
++def live_sub_detail(live: str = Path(...), user: dict = Depends(authenticate)):
+     live_obj = LiveSubdomains.objects(subdomain=live).first()
+     sub_obj = Subdomains.objects(subdomain=live).first()
+     if live_obj and sub_obj:
+@@ -245,7 +244,7 @@ async def live_sub_detail(live: str = Path(...), user: dict = Depends(authentica
+ # --- HTTP Services ---
+ 
+ @app.get("/api/http/all")
+-async def all_http(
++def all_http(
+     hours: int = Query(default=12),
+     limit: int = Query(default=1000, le=10000),
+     user: dict = Depends(authenticate),
+@@ -273,7 +272,7 @@ async def all_http(
+ 
+ 
+ @app.get("/api/http/fresh/{hours}")
+-async def http_fresh(hours: int = Path(..., description="Hours to look back"), user: dict = Depends(authenticate)):
++def http_fresh(hours: int = Path(..., description="Hours to look back"), user: dict = Depends(authenticate)):
+     ago = datetime.now() - timedelta(hours=hours)
+     fresh = HTTP.objects(created_date__gte=ago).all()
+     res_array = [h.url for h in fresh if h.url]
+@@ -281,25 +280,24 @@ async def http_fresh(hours: int = Path(..., description="Hours to look back"), u
+ 
+ 
+ @app.get("/api/http/provider/{provider}")
+-async def http_of_provider(
++def http_of_provider(
+     provider: str = Path(...),
+     hours: int = Query(default=12),
+     user: dict = Depends(authenticate),
+ ):
+     ago = datetime.now() - timedelta(hours=hours)
+-    subs_obj = Subdomains.objects(providers=provider).all()
+-    if not subs_obj:
++    names = list(Subdomains.objects(providers=provider).scalar('subdomain'))
++    if not names:
+         return {"message": f"The '{provider}' provider was not found"}
+-    response = ""
+-    for sub_obj in subs_obj:
+-        http_records = HTTP.objects(subdomain=sub_obj.subdomain, last_update__gte=ago).all()
+-        for h in http_records:
+-            response += f"{h.url}\n"
+-    return PlainTextResponse(response)
++    urls = []
++    for i in range(0, len(names), 5000):
++        part = names[i:i + 5000]
++        urls.extend(HTTP.objects(subdomain__in=part, last_update__gte=ago).scalar('url'))
++    return PlainTextResponse("".join(f"{u}\n" for u in urls if u))
+ 
+ 
+ @app.get("/api/http/subdomain/{subdomain}")
+-async def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(authenticate)):
++def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(authenticate)):
+     http_records = HTTP.objects(subdomain=subdomain).all()
+     if not http_records:
+         return {"message": f"No HTTP services found for subdomain '{subdomain}'"}, 404
+@@ -324,7 +322,7 @@ async def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(aut
+ # --- Health check ---
+ 
+ @app.get("/health")
+-async def health_check():
++def health_check():
+     from mongoengine import connection
+     try:
+         conn = connection.get_connection()
+diff --git a/database/db.py b/database/db.py
+index 7f69dbf..fda3221 100644
+--- a/database/db.py
++++ b/database/db.py
+@@ -1,9 +1,11 @@
+ import sys, os
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+-from mongoengine import Document, StringField, DateTimeField, ListField, DictField, connect
+-from datetime import datetime
++import re
++import atexit
++from datetime import datetime, timedelta
++from mongoengine import Document, StringField, DateTimeField, ListField, DictField, Q, connect
++from pymongo import UpdateOne
+ from config import config
+-import tldextract, requests
+ from logutil import get_logger, log_info, log_error, log_success
+ from notifier import notify, get_enabled_services
+ from logutil import log_warn
+@@ -14,22 +16,58 @@ def current_time():
+     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+ 
+ def get_domain_name(url):
++    import tldextract  # lazy: only the API needs it
+     ext = tldextract.extract(url)
+     return f"{ext.domain}.{ext.suffix}"
+ 
++
++# ---------------------------------------------------------------------------
++# Notifications: queued and sent as batched digests (never one POST per item)
++#   WATCH_NO_NOTIFY=1      disable DB-level notifications
++#   NOTIFY_MAX_PER_RUN=200 cap per process; the rest is summarised in one line
++# ---------------------------------------------------------------------------
++_NOTIFY_MAX = int(os.environ.get('NOTIFY_MAX_PER_RUN', '200'))
++_NOTIFY_DISABLED = os.environ.get('WATCH_NO_NOTIFY', '').lower() in ('1', 'true', 'yes')
++_pending = []
++_pending_len = 0
++_sent = 0
++_suppressed = 0
++
++
++def flush_notifications():
++    global _pending, _pending_len, _suppressed
++    if _pending:
++        notify("\n".join(_pending))
++        _pending = []
++        _pending_len = 0
++    if _suppressed:
++        notify(f"... and {_suppressed} more notifications suppressed (NOTIFY_MAX_PER_RUN={_NOTIFY_MAX})")
++        _suppressed = 0
++
++
+ def notify_all(message):
+-    """Send notification to all configured services."""
+-    services = get_enabled_services()
+-    if not services:
+-        log_warn(logger, "No notification services configured, skipping notification")
++    """Queue a notification; messages are flushed in batches (and at exit)."""
++    global _pending_len, _sent, _suppressed
++    if _NOTIFY_DISABLED or not get_enabled_services():
++        return
++    if _sent >= _NOTIFY_MAX:
++        _suppressed += 1
+         return
+-    notify(message)
++    _sent += 1
++    _pending.append(message)
++    _pending_len += len(message) + 1
++    if _pending_len >= 1800:
++        flush_notifications()
++
++
++atexit.register(flush_notifications)
+ 
+ 
+ _MONGO_HOST = os.environ.get('MONGO_HOST', '127.0.0.1')
+ _MONGO_PORT = os.environ.get('MONGO_PORT', '27017')
++_MONGO_URI = os.environ.get('MONGO_URI') or f'mongodb://{_MONGO_HOST}:{_MONGO_PORT}/watchtower'
+ log_info(logger, f"Connecting to MongoDB at {_MONGO_HOST}:{_MONGO_PORT}")
+-connect('watchtower', host=f'mongodb://{_MONGO_HOST}:{_MONGO_PORT}/watchtower')
++connect('watchtower', host=_MONGO_URI)
+ log_success(logger, "MongoDB connection established")
+ 
+ # Log which notification services are active
+@@ -48,7 +86,8 @@ class Programs(Document):
+ 
+     meta = {
+         'indexes': [
+-            {'fields': ['program_name'], 'unique': True}
++            {'fields': ['program_name'], 'unique': True},
++            'scopes',
+         ]
+     }
+ 
+@@ -59,10 +98,14 @@ class Subdomains(Document):
+     providers = ListField(StringField())
+     created_date = DateTimeField(default=datetime.now)
+     last_update = DateTimeField(default=datetime.now)
++    last_resolved = DateTimeField()
+ 
+     meta = {
+         'indexes': [
+-            {'fields': ['program_name', 'subdomain'], 'unique': True}
++            {'fields': ['program_name', 'subdomain'], 'unique': True},
++            'subdomain',
++            ['scope', 'last_resolved'],
++            'providers',
+         ]
+     }
+ 
+@@ -74,10 +117,15 @@ class LiveSubdomains(Document):
+     ips = ListField(StringField())
+     created_date = DateTimeField(default=datetime.now)
+     last_update = DateTimeField(default=datetime.now)
++    last_probed = DateTimeField()
+ 
+     meta = {
+         'indexes': [
+-            {'fields': ['program_name', 'subdomain'], 'unique': True}
++            {'fields': ['program_name', 'subdomain'], 'unique': True},
++            'subdomain',
++            ['scope', 'last_probed'],
++            'last_update',
++            'created_date',
+         ]
+     }
+ 
+@@ -95,111 +143,202 @@ class HTTP(Document):
+     favicon = StringField()
+     created_date = DateTimeField(default=datetime.now)
+     last_update = DateTimeField(default=datetime.now)
++    last_nuclei = DateTimeField()
+ 
++    # One record per URL (host + port + scheme): different ports of the same
++    # host no longer overwrite each other / trigger fake "changed" alerts.
+     meta = {
+         'indexes': [
+-            {'fields': ['program_name', 'subdomain'], 'unique': True}
++            {'fields': ['program_name', 'subdomain', 'url'], 'unique': True},
++            'subdomain',
++            'scope',
++            'last_update',
++            'created_date',
++            'last_nuclei',
+         ]
+     }
+ 
+ 
++def _migrate_indexes():
++    """
++    Older versions had a UNIQUE index on HTTP(program_name, subdomain), which
++    forbids several URLs per host. Drop it if it still exists.
++    """
++    try:
++        col = HTTP._get_collection()  # also makes sure the new indexes exist
++        for name, spec in col.index_information().items():
++            keys = [k for k, _ in spec.get('key', [])]
++            if name != '_id_' and spec.get('unique') and keys == ['program_name', 'subdomain']:
++                col.drop_index(name)
++                log_info(logger, f"Dropped legacy unique index {name} on HTTP")
++    except Exception as e:
++        log_warn(logger, f"Index migration skipped: {e}")
++
++
++_migrate_indexes()
++
++
++# ---------------------------------------------------------------------------
++# Lookup caches / helpers (avoid one Mongo round-trip per record)
++# ---------------------------------------------------------------------------
++_program_cache = {}   # program_name -> Programs
++_scope_cache = {}     # scope -> Programs
++_HOST_RE = re.compile(r'^[a-z0-9][a-z0-9._-]*$')
++
++
++def _program_by_name(name):
++    p = _program_cache.get(name)
++    if p is None:
++        p = Programs.objects(program_name=name).first()
++        if p:
++            _program_cache[name] = p
++    return p
++
++
++def _program_by_scope(scope):
++    p = _scope_cache.get(scope)
++    if p is None:
++        p = Programs.objects(scopes=scope).first()
++        if p:
++            _scope_cache[scope] = p
++    return p
++
++
++def match_scope(host, scopes):
++    """Return the scope that `host` belongs to (host == scope or *.scope), else None."""
++    for s in scopes:
++        if host == s or host.endswith('.' + s):
++            return s
++    return None
++
++
++def _chunked(seq, n):
++    seq = list(seq)
++    for i in range(0, len(seq), n):
++        yield seq[i:i + n]
++
++
++# ---------------------------------------------------------------------------
++# Incremental selection helpers
++# ---------------------------------------------------------------------------
++def get_subdomains_to_resolve(scope, stale_hours):
++    """Subdomains of `scope` never resolved, or not resolved in the last `stale_hours`."""
++    cutoff = datetime.now() - timedelta(hours=stale_hours)
++    qs = Subdomains.objects(scope=scope).filter(Q(last_resolved=None) | Q(last_resolved__lt=cutoff))
++    return list(qs.scalar('subdomain'))
++
++
++def mark_subdomains_resolved(scope, subdomains):
++    col = Subdomains._get_collection()
++    now = datetime.now()
++    for part in _chunked(subdomains, 5000):
++        col.update_many({'scope': scope, 'subdomain': {'$in': part}}, {'$set': {'last_resolved': now}})
++
++
++def get_lives_to_probe(scope, stale_hours):
++    """Live subdomains of `scope` never probed, or not probed in the last `stale_hours`."""
++    cutoff = datetime.now() - timedelta(hours=stale_hours)
++    qs = LiveSubdomains.objects(scope=scope).filter(Q(last_probed=None) | Q(last_probed__lt=cutoff))
++    return list(qs.scalar('subdomain'))
++
++
++def mark_lives_probed(scope, subdomains):
++    col = LiveSubdomains._get_collection()
++    now = datetime.now()
++    for part in _chunked(subdomains, 5000):
++        col.update_many({'scope': scope, 'subdomain': {'$in': part}}, {'$set': {'last_probed': now}})
++
++
++def get_urls_for_nuclei(rescan_days, limit):
++    """HTTP URLs never scanned by nuclei, or scanned more than `rescan_days` ago."""
++    cutoff = datetime.now() - timedelta(days=rescan_days)
++    qs = HTTP.objects(url__ne=None).filter(Q(last_nuclei=None) | Q(last_nuclei__lt=cutoff))
++    return list(qs.limit(limit).scalar('url'))
++
++
++def mark_urls_nuclei(urls):
++    col = HTTP._get_collection()
++    now = datetime.now()
++    for part in _chunked(urls, 5000):
++        col.update_many({'url': {'$in': part}}, {'$set': {'last_nuclei': now}})
++
++
++# ---------------------------------------------------------------------------
++# Upserts
++# ---------------------------------------------------------------------------
+ def upsert_lives(obj):
+-    program = Programs.objects(scopes=obj['domain']).first()
++    program = _program_by_scope(obj['domain'])
+     if not program:
+         log_error(logger, f"No program found for scope {obj['domain']}")
+         return
+ 
+-    existing = LiveSubdomains.objects(subdomain=obj['subdomain']).first()
+-
+-    if existing:
+-        obj_ips = list(obj.get('ips', []))
+-        obj_ips.sort()
+-        existing_ips = list(existing.ips)
+-        existing_ips.sort()
+-        if obj_ips != existing_ips:
+-            log_info(logger, f"Updated live subdomain: {obj['subdomain']} IPs changed")
+-            existing.ips = obj_ips
+-        existing.last_update = datetime.now()
+-        existing.save()
+-
+-    else:
+-        new_live = LiveSubdomains(
+-            program_name=program.program_name,
+-            subdomain=obj['subdomain'],
+-            scope=obj['domain'],
+-            ips=obj.get('ips', []),
+-            created_date=datetime.now(),
+-            last_update=datetime.now(),
+-            cdn=None
+-        )
+-        
+-        new_live.save()
++    now = datetime.now()
++    ips = sorted(set(obj.get('ips') or []))
++    res = LiveSubdomains._get_collection().update_one(
++        {'program_name': program.program_name, 'subdomain': obj['subdomain']},
++        {
++            '$set': {'ips': ips, 'scope': obj['domain'], 'last_update': now},
++            '$setOnInsert': {'created_date': now, 'cdn': obj.get('cdn')},
++        },
++        upsert=True,
++    )
++    if res.upserted_id is not None:
+         notify_all(f"```{obj['subdomain']} (fresh live) has been added to '{program.program_name}' program```")
+         log_success(logger, f"Inserted new live subdomain: {obj['subdomain']} for program: {program.program_name}")
+-        
++
++
+ def upsert_http(obj):
+-    program = Programs.objects(scopes=obj['scope']).first()
++    program = _program_by_scope(obj['scope'])
+     if not program:
+         log_error(logger, f"No program found for scope {obj['scope']}")
+         return
+ 
+-    existing = HTTP.objects(subdomain=obj['subdomain']).first()
+-
+-    if existing:
+-        title_changed = existing.title != obj.get('title')
+-        status_changed = existing.status_code != str(obj.get('status_code'))
+-        favicon_changed = existing.favicon != obj.get('favicon')
+-
+-        if title_changed:
+-            notify_all(f"```{obj['subdomain']} Title has been changed from '{existing.title}' to '{obj.get('title')}'```")
+-            log_info(logger, f"Title changed for subdomain: {obj['subdomain']}")
+-            existing.title = obj.get('title')
+-           
+-        if status_changed:
+-            notify_all(f"```{obj['subdomain']} Status Code has been changed from '{existing.status_code}' to '{str(obj.get('status_code'))}'```")
+-            log_info(logger, f"Status Code changed for subdomain: {obj['subdomain']}")
+-            existing.status_code = str(obj.get('status_code'))
+-
+-        if favicon_changed:
+-            notify_all(f"```{obj['subdomain']} favicon has been changed from '{existing.favicon}' to '{obj.get('favicon')}'```")
+-            log_info(logger, f"Favicon changed for subdomain: {obj['subdomain']}")
+-            existing.favicon = obj.get('favicon')
+-           
+-
+-        existing.ips = obj.get('ips')
+-        existing.tech = str(obj.get('tech'))
+-        existing.headers = obj.get('headers')
+-        existing.url = obj.get('url')
+-        existing.final_url = obj.get('final_url')
+-        
+-        existing.last_update = datetime.now()
+-        existing.save()
++    col = HTTP._get_collection()
++    sub = obj.get('subdomain')
++    url = obj.get('url') or sub
++    key = {'program_name': program.program_name, 'subdomain': sub, 'url': url}
++    now = datetime.now()
++    new_vals = {
++        'scope': obj.get('scope'),
++        'ips': obj.get('ips') or [],
++        'tech': str(obj.get('tech')),
++        'title': obj.get('title'),
++        'status_code': str(obj.get('status_code')),
++        'headers': obj.get('headers') or {},
++        'final_url': obj.get('final_url'),
++        'favicon': obj.get('favicon'),
++        'last_update': now,
++    }
++
++    existing = col.find_one(key, {'title': 1, 'status_code': 1, 'favicon': 1})
++    if existing is None:
++        first_for_host = col.count_documents(
++            {'program_name': program.program_name, 'subdomain': sub}, limit=1) == 0
++        col.update_one(key, {'$set': new_vals, '$setOnInsert': {'created_date': now}}, upsert=True)
++        if first_for_host:
++            notify_all(f"```{sub} (fresh http) has been added to '{program.program_name}' program```")
++        log_success(logger, f"Inserted new http service: {url} for program: {program.program_name}")
++        return
++
++    label = url
++    if existing.get('title') != obj.get('title'):
++        notify_all(f"```{label} Title has been changed from '{existing.get('title')}' to '{obj.get('title')}'```")
++        log_info(logger, f"Title changed for: {label}")
++    if existing.get('status_code') != str(obj.get('status_code')):
++        notify_all(f"```{label} Status Code has been changed from '{existing.get('status_code')}' to '{str(obj.get('status_code'))}'```")
++        log_info(logger, f"Status Code changed for: {label}")
++    if existing.get('favicon') != obj.get('favicon'):
++        notify_all(f"```{label} favicon has been changed from '{existing.get('favicon')}' to '{obj.get('favicon')}'```")
++        log_info(logger, f"Favicon changed for: {label}")
++
++    col.update_one({'_id': existing['_id']}, {'$set': new_vals})
+ 
+-    else:
+-        new_http_subdomain = HTTP(
+-            program_name = program.program_name,
+-            subdomain = obj.get('subdomain'),
+-            scope = obj.get('scope'),
+-            ips = obj.get('ips'),
+-            tech = str(obj.get('tech')),
+-            title = obj.get('title'),
+-            status_code = str(obj.get('status_code')),
+-            headers = obj.get('headers'),
+-            url = obj.get('url'),
+-            final_url = obj.get('final_url'),
+-            favicon = obj.get('favicon'),
+-            created_date = datetime.now(),
+-            last_update = datetime.now()
+-        )
+-        
+-        new_http_subdomain.save()
+-        notify_all(f"```{obj['subdomain']} (fresh http) has been added to '{program.program_name}' program```")
+-        log_success(logger, f"Inserted new http service: {obj['subdomain']} for program: {program.program_name}")
+-        
+ 
+ # Upsert (Update and Insert) Programs
+ def upsert_program(program_name, scopes, ooscopes, config):
+     program = Programs.objects(program_name=program_name).first()
++    scopes = scopes or []
++    ooscopes = ooscopes or []
+     if program:
+         program.config = config
+         program.scopes = scopes
+@@ -209,42 +348,77 @@ def upsert_program(program_name, scopes, ooscopes, config):
+     else:
+         new_program = Programs(
+             program_name=program_name,
+-            created_date=datetime.now,
++            created_date=datetime.now(),
+             config=config,
+             scopes=scopes,
+             ooscopes=ooscopes
+         )
+         new_program.save()
+         log_success(logger, f"Inserted new program: {new_program.program_name}")
++    _program_cache.pop(program_name, None)
++    _scope_cache.clear()
+ 
+-# Upsert subdomains (check if subdomain exists, if not insert, if yes update providers)
+-def upsert_subdomains(program_name, subdomain_name, provider):
+-    program = Programs.objects(program_name=program_name).first()
++
++def upsert_subdomains_bulk(program_name, subdomains, provider, chunk=1000):
++    """
++    Insert/update many subdomains with a few bulk writes instead of one
++    query per subdomain. Out-of-scope / junk hosts are skipped.
++    Returns the number of newly inserted subdomains.
++    """
++    program = _program_by_name(program_name)
+     if not program:
++        log_error(logger, f"Program '{program_name}' not found")
++        return 0
++
++    scopes = [s.strip().lower() for s in (program.scopes or []) if s and s.strip()]
++    oos = {x.strip().lower() for x in (program.ooscopes or []) if x and x.strip()}
++    col = Subdomains._get_collection()
++    now = datetime.now()
++
++    seen = set()
++    ops = []
++    stats = {'new': 0, 'skipped': 0, 'total': 0}
++
++    def flush():
++        if ops:
++            res = col.bulk_write(ops, ordered=False)
++            stats['new'] += res.upserted_count
++            ops.clear()
++
++    for raw in subdomains:
++        host = (raw or '').strip().lower().rstrip('.')
++        if not host or host in seen:
++            continue
++        seen.add(host)
++        if not _HOST_RE.match(host) or host in oos:
++            stats['skipped'] += 1
++            continue
++        scope = match_scope(host, scopes)
++        if not scope:
++            stats['skipped'] += 1
++            continue
++        stats['total'] += 1
++        ops.append(UpdateOne(
++            {'program_name': program_name, 'subdomain': host},
++            {
++                '$addToSet': {'providers': provider},
++                '$setOnInsert': {'scope': scope, 'created_date': now, 'last_update': now},
++            },
++            upsert=True,
++        ))
++        if len(ops) >= chunk:
++            flush()
++    flush()
++
++    log_info(logger, f"[{provider}] {program_name}: {stats['total']} in-scope, "
++                     f"{stats['new']} new, {stats['skipped']} skipped")
++    return stats['new']
++
++
++# Upsert a single subdomain (kept for backward compatibility)
++def upsert_subdomains(program_name, subdomain_name, provider):
++    if not _program_by_name(program_name):
+         log_error(logger, f"Program '{program_name}' not found for subdomain: {subdomain_name}")
+         return False
+-
+-    if get_domain_name(subdomain_name) not in program.scopes or subdomain_name in program.ooscopes:
+-        log_info(logger, f"Subdomain not in scope: {subdomain_name}")
+-        return True
+-
+-    existing = Subdomains.objects(program_name=program_name, subdomain=subdomain_name).first()
+-    if existing:
+-        if provider not in existing.providers:
+-            existing.providers.append(provider)
+-            existing.last_update = datetime.now()
+-            existing.save()
+-            log_info(logger, f"Updated subdomain providers: {subdomain_name}")
+-        # else: provider already recorded, no change needed
+-    else:
+-        new_subdomains = Subdomains(
+-            program_name = program_name,
+-            subdomain = subdomain_name,
+-            scope = get_domain_name(subdomain_name),
+-            providers = [provider],
+-            created_date = datetime.now(),
+-            last_update = datetime.now()
+-        )
+-        new_subdomains.save()
+-        log_success(logger, f"Inserted new subdomain: {subdomain_name}")
++    upsert_subdomains_bulk(program_name, [subdomain_name], provider)
+     return True
+diff --git a/docker-compose.yml b/docker-compose.yml
+index 487c7d9..8b1b9e0 100644
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -1,19 +1,26 @@
+-version: '3.8'
+-
+ services:
+   mongo:
+     image: mongo:6.0
+     container_name: mongo
+     restart: unless-stopped
++    command: ["mongod", "--wiredTigerCacheSizeGB", "0.5"]
++    cpus: 1.0
++    mem_limit: 1g
+     ports:
+       - "127.0.0.1:27017:27017"
+     volumes:
+       - watchtower-data:/data/db
+ 
++  # One-shot pipeline. It must NOT restart by itself: when it finishes it exits.
++  # Schedule it from the host instead, e.g. crontab:
++  #   0 */12 * * * cd /opt/watchtower && docker compose run --rm watchtower all
++  # or start the long-running scheduler service below (profile "scheduler").
+   watchtower:
+     build: .
+     container_name: watchtower
+-    restart: unless-stopped
++    restart: "no"
++    cpus: 1.0
++    mem_limit: 1g
+     depends_on:
+       - mongo
+     env_file:
+@@ -33,11 +40,36 @@ services:
+       # - ./programs:/app/programs:ro
+     command: ["all"]
+ 
++  # Optional long-running scheduler (sleeps between runs, runs the pipeline in-container):
++  #   docker compose --profile scheduler up -d scheduler
++  scheduler:
++    build: .
++    container_name: watchtower-scheduler
++    profiles: ["scheduler"]
++    restart: unless-stopped
++    cpus: 1.0
++    mem_limit: 1g
++    depends_on:
++      - mongo
++    env_file:
++      - .env
++    environment:
++      - MONGO_HOST=mongo
++      - PYTHONPATH=/app
++    volumes:
++      - ./volumes/resolvers:/app/config/resolvers:ro
++      - ./volumes/wordlists:/app/config/wordlists:ro
++      - ./volumes/nuclei-templates:/app/nuclei-templates:ro
++      - ./volumes/gau-config:/app/config/gau-config:ro
++    command: ["scheduler", "--runs", "2"]
++
+   # Optional: API server (run with: docker compose --profile api up)
+   api:
+     build: .
+     container_name: watchtower-api
+     profiles: ["api"]
++    cpus: 0.5
++    mem_limit: 512m
+     depends_on:
+       - mongo
+     env_file:
+@@ -59,6 +91,9 @@ services:
+     build: .
+     container_name: watchtower-api-server
+     profiles: ["api-server"]
++    restart: unless-stopped
++    cpus: 0.5
++    mem_limit: 512m
+     depends_on:
+       - mongo
+     env_file:
+diff --git a/enum/watch_abuse.py b/enum/watch_abuse.py
+index 71d483d..f0e2d79 100644
+--- a/enum/watch_abuse.py
++++ b/enum/watch_abuse.py
+@@ -49,8 +49,7 @@ if __name__ == "__main__":
+         log_info(logger, f"Running abuse module for '{domain}' (program: {program.program_name})")
+         subs = abusewhois(domain)
+         if subs:
+-            for sub in subs:
+-                upsert_subdomains(program.program_name, sub, 'abuse')
++            upsert_subdomains_bulk(program.program_name, subs, 'abuse')
+             log_success(logger, f"Upserted {len(subs)} abuse subdomains for {domain}")
+         else:
+             log_warn(logger, f"No subdomains found via AbuseIPDB for {domain}")
+diff --git a/enum/watch_crtsh.py b/enum/watch_crtsh.py
+index 5ff2aef..71e3ffe 100644
+--- a/enum/watch_crtsh.py
++++ b/enum/watch_crtsh.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ import sys, os, subprocess, re
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
+ 
+@@ -8,7 +9,7 @@ logger = get_logger("watch_crtsh")
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+ 
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+@@ -49,11 +50,15 @@ def crtsh(domain, retries=3):
+             """, (domain,))
+ 
+             names = set()
+-            for (name,) in cur.fetchall():
+-                if name:
+-                    name = name.strip().replace(" ", "").lower()
++            # NAME_VALUE can hold several names separated by newlines: split them,
++            # otherwise every name except the last one is lost.
++            for (name_value,) in cur:
++                if not name_value:
++                    continue
++                for name in name_value.replace(" ", "").lower().split("\n"):
++                    name = name.strip().lstrip("*").lstrip(".")
+                     if name.endswith("." + domain):
+-                        names.add(name.lstrip("."))
++                        names.add(name)
+             cur.close()
+             conn.close()
+             res = sorted(names)
+@@ -82,9 +87,7 @@ if __name__ == "__main__":
+         subs = crtsh(domain)
+ 
+         if subs:
+-            for sub in subs:
+-                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
+-                    upsert_subdomains(program.program_name, sub, 'crtsh')
++            upsert_subdomains_bulk(program.program_name, subs, 'crtsh')
+             log_success(logger, f"Upserted crt.sh results for {domain}")
+         else:
+             log_warn(logger, f"No subdomains found via crt.sh for {domain}")
+diff --git a/enum/watch_enum_all.py b/enum/watch_enum_all.py
+index 5a97c7a..d03730c 100644
+--- a/enum/watch_enum_all.py
++++ b/enum/watch_enum_all.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess
++import sys, os, subprocess, shlex
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from database.db import *
+ from config import config
+ from logutil import get_logger, log_info, log_error, log_success, log_warn, log_phase, log_step
+@@ -9,7 +10,7 @@ logger = get_logger("watch_enum_all")
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+ 
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+@@ -37,12 +38,13 @@ if __name__ == "__main__":
+             log_info(logger, f"  Enumerating subdomains for scope: {scope}")
+             enum_path = config().get("WATCH_DIR") + '/enum'
+ 
++            q = shlex.quote(scope)
+             modules = [
+-                ('crtsh', f"python3 {enum_path}/watch_crtsh.py {scope}"),
+-                ('subfinder', f"python3 {enum_path}/watch_subfinder.py {scope}"),
+-                ('abuse', f"python3 {enum_path}/watch_abuse.py {scope}"),
+-                ('wayback', f"python3 {enum_path}/watch_wayback.py {scope}"),
+-                ('gau', f"python3 {enum_path}/watch_gau.py {scope}"),
++                ('crtsh', f"python3 {enum_path}/watch_crtsh.py {q}"),
++                ('subfinder', f"python3 {enum_path}/watch_subfinder.py {q}"),
++                ('abuse', f"python3 {enum_path}/watch_abuse.py {q}"),
++                ('wayback', f"python3 {enum_path}/watch_wayback.py {q}"),
++                ('gau', f"python3 {enum_path}/watch_gau.py {q}"),
+             ]
+ 
+             for module_name, cmd in modules:
+diff --git a/enum/watch_gau.py b/enum/watch_gau.py
+index 2452675..25343f8 100644
+--- a/enum/watch_gau.py
++++ b/enum/watch_gau.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, re
++import sys, os, subprocess, re, shlex
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
+ 
+@@ -8,7 +9,7 @@ logger = get_logger("watch_gau")
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+ 
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+@@ -25,7 +26,10 @@ class colors:
+     RESET = "\033[0m"
+ 
+ def gau(domain):
+-    command = f"echo {domain} | gau --config {config().get('GAU_CONFIG')} | unfurl domains | sort -u"
++    cfg = config().get('GAU_CONFIG')
++    cfg_arg = f"--config {shlex.quote(cfg)}" if cfg and os.path.isfile(cfg) else ""
++    max_urls = int(os.environ.get('ENUM_MAX_URLS', '500000'))  # cap huge result sets
++    command = f"echo {shlex.quote(domain)} | gau {cfg_arg} | head -n {max_urls} | unfurl domains | sort -u"
+     log_info(logger, f"Executing: {command}")
+     res = run_command_in_bash(command)
+     if not res:
+@@ -40,6 +44,11 @@ if __name__ == "__main__":
+         print("Usage: watch_gau <domain>")
+         sys.exit(1)
+ 
++    from runutil import missing_tools
++    if missing_tools(['gau', 'unfurl']):
++        log_error(logger, "Required tool not found in PATH: gau / unfurl")
++        sys.exit(1)
++
+     domain = sys.argv[1]
+     program = Programs.objects(scopes=domain).first()
+ 
+@@ -48,9 +57,7 @@ if __name__ == "__main__":
+         subs = gau(domain)
+ 
+         if subs:
+-            for sub in subs:
+-                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
+-                    upsert_subdomains(program.program_name, sub, 'gau')
++            upsert_subdomains_bulk(program.program_name, subs, 'gau')
+             log_success(logger, f"Upserted gau results for {domain}")
+         else:
+             log_warn(logger, f"No subdomains found via gau for {domain}")
+diff --git a/enum/watch_subfinder.py b/enum/watch_subfinder.py
+index d300e93..787dbd3 100644
+--- a/enum/watch_subfinder.py
++++ b/enum/watch_subfinder.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess
++import sys, os, subprocess, shlex
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
+ 
+@@ -8,7 +9,7 @@ logger = get_logger("watch_subfinder")
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+ 
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+@@ -25,7 +26,10 @@ class colors:
+     RESET = "\033[0m"
+ 
+ def subfinder(domain):
+-    command = f"subfinder -d {domain} -all"
++    # "-all" (every source) is much heavier: opt in with SUBFINDER_ALL=1
++    all_flag = " -all" if os.environ.get('SUBFINDER_ALL', '0') == '1' else ""
++    rate = os.environ.get('SUBFINDER_RATE_LIMIT', '30')
++    command = f"subfinder -d {shlex.quote(domain)} -silent -rl {rate}{all_flag}"
+     log_info(logger, f"Executing: {command}")
+     res = run_command_in_bash(command)
+     if not res:
+@@ -40,6 +44,11 @@ if __name__ == "__main__":
+         print("Usage: watch_subfinder <domain>")
+         sys.exit(1)
+ 
++    from runutil import missing_tools
++    if missing_tools(['subfinder']):
++        log_error(logger, "Required tool not found in PATH: subfinder")
++        sys.exit(1)
++
+     domain = sys.argv[1]
+     program = Programs.objects(scopes=domain).first()
+ 
+@@ -48,11 +57,7 @@ if __name__ == "__main__":
+         subs = subfinder(domain)
+ 
+         if subs:
+-            for sub in subs:
+-                try:
+-                    upsert_subdomains(program.program_name, sub, 'subfinder')
+-                except Exception as e:
+-                    log_error(logger, f"Failed to upsert subdomain {sub}: {e}")
++            upsert_subdomains_bulk(program.program_name, subs, 'subfinder')
+             log_success(logger, f"Upserted {len(subs)} subdomains for {domain}")
+         else:
+             log_warn(logger, f"No subdomains found for {domain}")
+diff --git a/enum/watch_wayback.py b/enum/watch_wayback.py
+index cedfcc6..fd963d1 100644
+--- a/enum/watch_wayback.py
++++ b/enum/watch_wayback.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, re
++import sys, os, subprocess, re, shlex
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
+ 
+@@ -8,7 +9,7 @@ logger = get_logger("watch_wayback")
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+ 
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+@@ -25,7 +26,8 @@ class colors:
+     RESET = "\033[0m"
+ 
+ def waybackurls(domain):
+-    command = f"waybackurls {domain} | unfurl domains | sort -u"
++    max_urls = int(os.environ.get('ENUM_MAX_URLS', '500000'))  # cap huge result sets
++    command = f"waybackurls {shlex.quote(domain)} | head -n {max_urls} | unfurl domains | sort -u"
+     log_info(logger, f"Executing: {command}")
+     res = run_command_in_bash(command)
+     if not res:
+@@ -40,6 +42,11 @@ if __name__ == "__main__":
+         print("Usage: watch_wayback <domain>")
+         sys.exit(1)
+ 
++    from runutil import missing_tools
++    if missing_tools(['waybackurls', 'unfurl']):
++        log_error(logger, "Required tool not found in PATH: waybackurls / unfurl")
++        sys.exit(1)
++
+     domain = sys.argv[1]
+     program = Programs.objects(scopes=domain).first()
+ 
+@@ -48,9 +55,7 @@ if __name__ == "__main__":
+         subs = waybackurls(domain)
+ 
+         if subs:
+-            for sub in subs:
+-                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
+-                    upsert_subdomains(program.program_name, sub, 'waybackurls')
++            upsert_subdomains_bulk(program.program_name, subs, 'waybackurls')
+             log_success(logger, f"Upserted waybackurls results for {domain}")
+         else:
+             log_warn(logger, f"No subdomains found via waybackurls for {domain}")
+diff --git a/http/watch_http_all.py b/http/watch_http_all.py
+index e01ffb6..4459b46 100644
+--- a/http/watch_http_all.py
++++ b/http/watch_http_all.py
+@@ -1,64 +1,60 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, tempfile, json
++import sys, os, shlex, tempfile, json
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+ from config import config
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
++from runutil import StreamProc, missing_tools
+ 
+ logger = get_logger("watch_http_all")
+ 
+-def run_command_in_bash(command):
+-    try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+-        if result.returncode != 0:
+-            log_error(logger, f"Command failed: {command}")
+-            log_error(logger, f"stderr: {result.stderr}")
+-            return False
+-        return result.stdout
+-    except subprocess.CalledProcessError as exc:
+-        log_error(logger, f"Command exception: {exc}")
+-
+-def create_tempfile(data):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        temp_file.write(data)
+-        return temp_file.name
+-
+-class colors:
+-    GRAY = "\033[90m"
+-    RESET = "\033[0m"
++# Light defaults. Heavier probing is opt-in through env vars.
++HTTPX_PORTS = os.environ.get('HTTPX_PORTS', '80,443')
++HTTPX_THREADS = os.environ.get('HTTPX_THREADS', '10')
++HTTPX_RATE_LIMIT = os.environ.get('HTTPX_RATE_LIMIT', '10')
++HTTPX_RETRIES = os.environ.get('HTTPX_RETRIES', '1')
++HTTPX_TIMEOUT = os.environ.get('HTTPX_TIMEOUT', '7')
++HTTPX_TECH = os.environ.get('HTTPX_TECH', '0') == '1'        # -tech-detect (CPU heavy)
++HTTPX_FAVICON = os.environ.get('HTTPX_FAVICON', '0') == '1'  # -favicon (extra request per host)
++# Only probe live subdomains that are new or were not probed for this many hours
++STALE_HOURS = float(os.environ.get('HTTP_STALE_HOURS', '24'))
++
+ 
+ def httpx(subdomains_array, domain):
+     if not subdomains_array:
+         log_warn(logger, f"No subdomains to probe for {domain}")
+         return True
+ 
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
++    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.txt') as temp_file:
+         for sub in subdomains_array:
+             temp_file.write(sub + "\n")
+     subdomains_file = temp_file.name
+ 
++    extra = ""
++    if HTTPX_TECH:
++        extra += " -tech-detect"
++    if HTTPX_FAVICON:
++        extra += " -favicon"
++
+     command = (
+-        f"httpx -l {subdomains_file} -json -favicon -fhr -tech-detect -irh "
+-        f"-include-chain -timeout 5 -retries 3 -threads 50 -rate-limit 10 "
+-        f"-ports 443,80,8080,8443 -extract-fqdn -silent "
++        f"httpx -l {shlex.quote(subdomains_file)} -json -fhr -irh "
++        f"-timeout {HTTPX_TIMEOUT} -retries {HTTPX_RETRIES} -threads {HTTPX_THREADS} "
++        f"-rate-limit {HTTPX_RATE_LIMIT} -ports {HTTPX_PORTS} -silent{extra} "
+         f"-H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0' "
+-        f"-H 'Referrer: https://{domain}'"
++        f"-H {shlex.quote('Referrer: https://' + domain)}"
+     )
+ 
+     log_info(logger, f"Running httpx for {len(subdomains_array)} subdomains in {domain}")
+-    results = run_command_in_bash(command)
+-
+-    if not results or results is False:
+-        log_warn(logger, f"No HTTP results for {domain}")
+-        os.unlink(subdomains_file)
+-        return True
+ 
+     count = 0
+-    for line in results.splitlines() if isinstance(results, str) else results:
+-        if not line.strip():
+-            continue
+-        try:
+-            json_obj = json.loads(line)
++    proc = StreamProc(command)
++    try:
++        for line in proc:
++            try:
++                json_obj = json.loads(line)
++            except json.JSONDecodeError:
++                log_error(logger, f"Failed to parse httpx JSON line: {line[:200]}")
++                continue
+             upsert_http({
+                 "subdomain": json_obj.get('input', json_obj.get('host', '')),
+                 "scope": domain,
+@@ -72,37 +68,51 @@ def httpx(subdomains_array, domain):
+                 "favicon": json_obj.get('favicon', '')
+             })
+             count += 1
+-        except json.JSONDecodeError:
+-            log_error(logger, f"Failed to parse httpx JSON line: {line[:200]}")
++    finally:
++        os.unlink(subdomains_file)
++
++    if proc.ok:
++        mark_lives_probed(domain, subdomains_array)
++    else:
++        log_error(logger, f"httpx did not finish cleanly for {domain} "
++                          f"(rc={proc.returncode}, timeout={proc.timed_out}); will retry next run")
+ 
+     log_success(logger, f"httpx: {count} HTTP services found for {domain}")
+-    os.unlink(subdomains_file)
+     return True
+ 
+-if __name__ == "__main__":
+-    log_step(logger, "Starting HTTP probing for all programs")
+ 
++def main():
++    if missing_tools(['httpx']):
++        log_error(logger, "Required tool not found in PATH: httpx")
++        sys.exit(1)
++
++    if len(sys.argv) > 1:
++        # Single domain mode: probe every live subdomain of that scope
++        domain = sys.argv[1]
++        subs = get_lives_to_probe(domain, 0)
++        if subs:
++            log_info(logger, f"Running httpx module for '{domain}'")
++            httpx(subs, domain)
++        else:
++            log_warn(logger, f"No live subdomains found for {domain}")
++        return
++
++    log_step(logger, "Starting HTTP probing for all programs")
+     programs = Programs.objects().all()
+     total_programs = len(programs)
+-    log_info(logger, f"Found {total_programs} programs to probe")
++    log_info(logger, f"Found {total_programs} programs to probe (stale after {STALE_HOURS}h)")
+ 
+     for i, program in enumerate(programs, 1):
+         for scope in program.scopes:
+-            obj_lives = LiveSubdomains.objects(scope=scope)
+-            if obj_lives:
+-                log_info(logger, f"[{i}/{total_programs}] [{program.program_name}] Probing {scope}")
+-                httpx([obj_live.subdomain for obj_live in obj_lives], scope)
++            subs = get_lives_to_probe(scope, STALE_HOURS)
++            if subs:
++                log_info(logger, f"[{i}/{total_programs}] [{program.program_name}] Probing {scope} ({len(subs)} hosts)")
++                httpx(subs, scope)
+             else:
+-                log_warn(logger, f"No live subdomains for scope {scope}")
++                log_info(logger, f"[{program.program_name}] nothing to probe for {scope}")
+ 
+     log_success(logger, "HTTP probing pipeline complete")
+ 
+-if __name__ == "__main__" and len(sys.argv) > 1:
+-    # Single domain mode
+-    domain = sys.argv[1]
+-    obj_lives = LiveSubdomains.objects(scope=domain)
+-    if obj_lives:
+-        log_info(logger, f"Running httpx module for '{domain}'")
+-        httpx([obj_live.subdomain for obj_live in obj_lives], domain)
+-    else:
+-        log_warn(logger, f"No live subdomains found for {domain}")
++
++if __name__ == "__main__":
++    main()
+diff --git a/http/watch_httpx.py b/http/watch_httpx.py
+index c714af8..a834557 100644
+--- a/http/watch_httpx.py
++++ b/http/watch_httpx.py
+@@ -1,89 +1,15 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, tempfile
+-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+-from config import config
+-from database.db import *
+-from logutil import get_logger, log_info, log_error, log_success, log_warn
++"""
++Single-domain HTTP probing:  watch_httpx.py <domain>
+ 
+-logger = get_logger("watch_httpx")
+-
+-def run_command_in_bash(command):
+-    try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+-        if result.returncode != 0:
+-            log_error(logger, f"Command failed: {command}")
+-            log_error(logger, f"stderr: {result.stderr}")
+-            return False
+-        return result.stdout
+-    except subprocess.CalledProcessError as exc:
+-        log_error(logger, f"Command exception: {exc}")
+-
+-def create_tempfile(data):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        temp_file.write(data)
+-        return temp_file.name
+-
+-class colors:
+-    GRAY = "\033[90m"
+-    RESET = "\033[0m"
+-
+-def httpx(subdomains_array, domain):
+-    if not subdomains_array:
+-        log_warn(logger, f"No subdomains to probe for {domain}")
+-        return True
+-
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        for sub in subdomains_array:
+-            temp_file.write(sub + "\n")
+-    subdomains_file = temp_file.name
+-
+-    command = (
+-        f"echo {{}} | httpx -json -favicon -fhr -tech-detect -irh -include-chain "
+-        f"-timeout 5 -retries 3 -threads 5 -rate-limit 5 -ports 443 -extract-fqdn "
+-        f"-silent "
+-        f"-H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0' "
+-        f"-H 'Referrer: https://{domain}'"
+-    )
+-
+-    log_info(logger, f"Running httpx for domain: {domain}")
+-
+-    count = 0
+-    for sub in subdomains_array:
+-        full_command = command.format(sub)
+-        results = run_command_in_bash(full_command)
+-        if results and results.strip():
+-            try:
+-                json_obj = json.loads(results)
+-                upsert_http({
+-                    "subdomain": sub,
+-                    "scope": domain,
+-                    "ips": json_obj.get('a', []),
+-                    "tech": json_obj.get('tech', []),
+-                    "title": json_obj.get('title', ''),
+-                    "status_code": json_obj.get('status_code'),
+-                    "headers": json_obj.get('header', {}),
+-                    "url": json_obj.get('url'),
+-                    "final_url": json_obj.get('final_url', ''),
+-                    "favicon": json_obj.get('favicon', '')
+-                })
+-                count += 1
+-            except json.JSONDecodeError:
+-                log_error(logger, f"Failed to parse httpx JSON for {sub}")
+-
+-    log_success(logger, f"httpx: {count} HTTP services probed for {domain}")
+-    os.unlink(subdomains_file)
+-    return True
++Uses the same batched httpx run as watch_http_all.py (one httpx process for the
++whole domain, instead of one process per subdomain).
++"""
++import sys
+ 
+ if __name__ == "__main__":
+     if len(sys.argv) < 2:
+         print("Usage: watch_httpx <domain>")
+         sys.exit(1)
+-
+-    domain = sys.argv[1]
+-    obj_lives = LiveSubdomains.objects(scope=domain)
+-
+-    if obj_lives:
+-        log_info(logger, f"Running httpx module for '{domain}'")
+-        httpx([obj_live.subdomain for obj_live in obj_lives], domain)
+-    else:
+-        log_warn(logger, f"No live subdomains found for {domain}")
++    from watch_http_all import main
++    main()
+diff --git a/logutil.py b/logutil.py
+index e4c0571..be67a61 100644
+--- a/logutil.py
++++ b/logutil.py
+@@ -59,7 +59,10 @@ def get_logger(name="watchtower", level="INFO", file_level=None):
+ 
+     if name not in _initialized_loggers:
+         # File handler — always DEBUG to capture everything
+-        file_handler = logging.FileHandler(get_log_file())
++        import logging.handlers
++        file_handler = logging.handlers.RotatingFileHandler(
++            get_log_file(), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
++        )
+         file_handler.setLevel(logging.DEBUG)
+         file_formatter = logging.Formatter(
+             "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+diff --git a/notifier.py b/notifier.py
+index ad4bc4e..77987f9 100644
+--- a/notifier.py
++++ b/notifier.py
+@@ -29,6 +29,28 @@ from dotenv import load_dotenv
+ load_dotenv()
+ logger = get_logger("notifier")
+ 
++DISCORD_LIMIT = 1900   # Discord max is 2000
++TELEGRAM_LIMIT = 4000  # Telegram max is 4096
++
++
++def _chunks(text, limit):
++    """Split text into pieces <= limit characters, preferring line boundaries."""
++    out, cur = [], ""
++    for line in text.splitlines(True):
++        while len(line) > limit:
++            if cur:
++                out.append(cur)
++                cur = ""
++            out.append(line[:limit])
++            line = line[limit:]
++        if cur and len(cur) + len(line) > limit:
++            out.append(cur)
++            cur = ""
++        cur += line
++    if cur:
++        out.append(cur)
++    return out
++
+ 
+ def is_discord_enabled():
+     """Check if Discord webhook URL is configured."""
+@@ -59,18 +81,29 @@ def send_discord(message):
+         log_warn(logger, "Discord webhook URL not configured, skipping")
+         return False
+ 
++    import time
++    ok = True
+     try:
+-        response = requests.post(
+-            webhook_url,
+-            json={"content": message},
+-            timeout=10,
+-        )
+-        if response.status_code in (204, 200):
+-            log_success(logger, "Discord notification sent")
+-            return True
+-        else:
+-            log_error(logger, f"Discord webhook failed: {response.status_code} {response.text}")
+-            return False
++        for part in _chunks(str(message), DISCORD_LIMIT):
++            response = requests.post(
++                webhook_url,
++                json={"content": part},
++                timeout=10,
++            )
++            if response.status_code == 429:
++                try:
++                    wait = float(response.json().get("retry_after", 2))
++                except Exception:
++                    wait = 2.0
++                time.sleep(min(wait, 30))
++                response = requests.post(webhook_url, json={"content": part}, timeout=10)
++            if response.status_code in (204, 200):
++                log_success(logger, "Discord notification sent")
++            else:
++                log_error(logger, f"Discord webhook failed: {response.status_code} {response.text}")
++                ok = False
++            time.sleep(0.5)
++        return ok
+     except Exception as e:
+         log_error(logger, f"Discord notification error: {e}")
+         return False
+@@ -85,19 +118,23 @@ def send_telegram(message):
+         log_warn(logger, "Telegram credentials not configured, skipping")
+         return False
+ 
++    import time
++    ok = True
+     try:
+         url = f"https://api.telegram.org/bot{token}/sendMessage"
+-        response = requests.post(
+-            url,
+-            data={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+-            timeout=10,
+-        )
+-        if response.status_code == 200:
+-            log_success(logger, "Telegram notification sent")
+-            return True
+-        else:
+-            log_error(logger, f"Telegram API failed: {response.status_code} {response.text}")
+-            return False
++        for part in _chunks(str(message), TELEGRAM_LIMIT):
++            response = requests.post(
++                url,
++                data={"chat_id": chat_id, "text": part, "parse_mode": "Markdown"},
++                timeout=10,
++            )
++            if response.status_code == 200:
++                log_success(logger, "Telegram notification sent")
++            else:
++                log_error(logger, f"Telegram API failed: {response.status_code} {response.text}")
++                ok = False
++            time.sleep(0.5)
++        return ok
+     except Exception as e:
+         log_error(logger, f"Telegram notification error: {e}")
+         return False
+diff --git a/ns/watch_brute.py b/ns/watch_brute.py
+index e39ab42..87d5b8e 100644
+--- a/ns/watch_brute.py
++++ b/ns/watch_brute.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ import sys, os, subprocess, tempfile
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
++from runutil import run_bash
+ from config import config
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
+ 
+@@ -12,7 +13,7 @@ class colors:
+ 
+ def run_command_in_bash(command):
+     try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
++        result = run_bash(command)
+         if result.returncode != 0:
+             log_error(logger, f"Command failed: {command}")
+             log_error(logger, f"stderr: {result.stderr}")
+diff --git a/ns/watch_ns.py b/ns/watch_ns.py
+index 4b0c973..c769416 100644
+--- a/ns/watch_ns.py
++++ b/ns/watch_ns.py
+@@ -1,77 +1,80 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, tempfile, json
++import sys, os, shlex, tempfile, json
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+ from config import config
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn
++from runutil import StreamProc, missing_tools
+ 
+ logger = get_logger("watch_ns")
+ 
+-def run_command_in_bash(command):
+-    try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+-
+-        if result.returncode != 0:
+-            log_error(logger, f"Command failed: {command}")
+-            log_error(logger, f"stderr: {result.stderr}")
+-            return False
+-
+-        return result.stdout.splitlines()
+-        
+-    except subprocess.CalledProcessError as exc:
+-        log_error(logger, f"Command exception: {exc}")
+-
+-def create_tempfile(data):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        temp_file.write(data)
+-        return temp_file.name
++# Only (re)resolve subdomains that are new or older than this many hours
++STALE_HOURS = float(os.environ.get('RESOLVE_STALE_HOURS', '24'))
++DNSX_THREADS = os.environ.get('DNSX_THREADS', '20')
++DNSX_RATE_LIMIT = os.environ.get('DNSX_RATE_LIMIT', '50')
+ 
+-class colors:
+-    GRAY = "\033[90m"
+-    RESET = "\033[0m"
+ 
+ def dnsx(subdomains_array, domain):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
++    """Resolve subdomains with dnsx only (no shuffledns/massdns double resolving)."""
++    if not subdomains_array:
++        return True
++
++    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.txt') as temp_file:
+         for sub in subdomains_array:
+             temp_file.write(sub + "\n")
+     subdomains_file = temp_file.name
+-    command = f"shuffledns -l {subdomains_file} -silent -d {domain} -mode resolve -r {config()['RESOLVERS_PATH']} -t 10 | dnsx -silent -resp -json -r {config()['RESOLVERS_PATH']}"
++
++    resolvers = config()['RESOLVERS_PATH']
++    resolvers_arg = f"-r {shlex.quote(resolvers)}" if resolvers and os.path.isfile(resolvers) else ""
++    command = (
++        f"dnsx -l {shlex.quote(subdomains_file)} -silent -a -resp -json "
++        f"-t {DNSX_THREADS} -rl {DNSX_RATE_LIMIT} {resolvers_arg}"
++    )
++    log_info(logger, f"Resolving {len(subdomains_array)} subdomains of {domain}")
+     log_info(logger, f"Executing: {command}")
+-    results = run_command_in_bash(command)
+ 
+-    if not results:
+-        log_warn(logger, f"No DNS results for {domain}")
++    count = 0
++    proc = StreamProc(command)
++    try:
++        for line in proc:
++            try:
++                res = json.loads(line)
++                upsert_lives({
++                    'subdomain': res['host'],
++                    'domain': domain,
++                    'ips': res.get('a', []),
++                    'cdn': None
++                })
++                count += 1
++            except (json.JSONDecodeError, KeyError) as e:
++                log_error(logger, f"Failed to parse DNS result: {e}")
++    finally:
+         os.unlink(subdomains_file)
+-        return True
+ 
+-    count = 0
+-    for res in results:
+-        try:
+-            res = json.loads(res)
+-            upsert_lives({
+-                'subdomain': res['host'],
+-                'domain': domain,
+-                'ips': res.get('a', []),
+-                'cdn': None
+-            })
+-            count += 1
+-        except (json.JSONDecodeError, KeyError) as e:
+-            log_error(logger, f"Failed to parse DNS result: {e}")
++    if proc.ok:
++        mark_subdomains_resolved(domain, subdomains_array)
++    else:
++        log_error(logger, f"dnsx did not finish cleanly for {domain} "
++                          f"(rc={proc.returncode}, timeout={proc.timed_out}); will retry next run")
+ 
+     log_success(logger, f"DNS resolution: {count} live hosts for {domain}")
+-    os.unlink(subdomains_file)
+     return True
+ 
++
+ if __name__ == "__main__":
+     if len(sys.argv) < 2:
+         print("Usage: watch_ns <domain>")
+         sys.exit(1)
+ 
++    if missing_tools(['dnsx']):
++        log_error(logger, "Required tool not found in PATH: dnsx")
++        sys.exit(1)
++
+     domain = sys.argv[1]
+-    obj_subs = Subdomains.objects(scope=domain)
++    subs = get_subdomains_to_resolve(domain, 0)  # single mode: resolve everything
+ 
+-    if obj_subs:
++    if subs:
+         log_info(logger, f"Running DnsX module for '{domain}'")
+-        dnsx([obj_sub.subdomain for obj_sub in obj_subs], domain)
++        dnsx(subs, domain)
+     else:
+         log_warn(logger, f"No subdomains found for scope {domain}")
+diff --git a/ns/watch_ns_all.py b/ns/watch_ns_all.py
+index c6595c1..90778d7 100644
+--- a/ns/watch_ns_all.py
++++ b/ns/watch_ns_all.py
+@@ -1,81 +1,31 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, tempfile, json
++import sys, os
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+-from config import config
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
++from runutil import missing_tools
++from watch_ns import dnsx, STALE_HOURS
+ 
+ logger = get_logger("watch_ns_all")
+ 
+-def run_command_in_bash(command):
+-    try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+-
+-        if result.returncode != 0:
+-            log_error(logger, f"Command failed: {command}")
+-            log_error(logger, f"stderr: {result.stderr}")
+-            return False
+-
+-        return result.stdout.splitlines()
+-        
+-    except subprocess.CalledProcessError as exc:
+-        log_error(logger, f"Command exception: {exc}")
+-
+-def create_tempfile(data):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        temp_file.write(data)
+-        return temp_file.name
+-
+-class colors:
+-    GRAY = "\033[90m"
+-    RESET = "\033[0m"
+-
+-def dnsx(subdomains_array, domain):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+-        for sub in subdomains_array:
+-            temp_file.write(sub + "\n")
+-    subdomains_file = temp_file.name
+-    command = f"shuffledns -l {subdomains_file} -silent -d {domain} -mode resolve -r {config()['RESOLVERS_PATH']} -t 10 | dnsx -silent -resp -json -r {config()['RESOLVERS_PATH']}"
+-    log_info(logger, f"Executing: {command}")
+-    results = run_command_in_bash(command)
+-
+-    if not results:
+-        log_warn(logger, f"No DNS results for {domain}")
+-        os.unlink(subdomains_file)
+-        return True
+-
+-    count = 0
+-    for res in results:
+-        try:
+-            res = json.loads(res)
+-            upsert_lives({
+-                'subdomain': res['host'],
+-                'domain': domain,
+-                'ips': res.get('a', []),
+-                'cdn': None
+-            })
+-            count += 1
+-        except (json.JSONDecodeError, KeyError) as e:
+-            log_error(logger, f"Failed to parse DNS result: {e}")
+-
+-    log_success(logger, f"DNS resolution: {count} live hosts for {domain}")
+-    os.unlink(subdomains_file)
+-    return True
+-
+ if __name__ == "__main__":
+     log_step(logger, "Starting DNS resolution for all programs")
+ 
++    if missing_tools(['dnsx']):
++        log_error(logger, "Required tool not found in PATH: dnsx")
++        sys.exit(1)
++
+     programs = Programs.objects().all()
+     total_programs = len(programs)
+-    log_info(logger, f"Found {total_programs} programs to resolve")
++    log_info(logger, f"Found {total_programs} programs to resolve (stale after {STALE_HOURS}h)")
+ 
+     for i, program in enumerate(programs, 1):
+         for scope in program.scopes:
+-            obj_subs = Subdomains.objects(scope=scope)
+-            if obj_subs:
+-                log_info(logger, f"[{i}/{total_programs}] [{program.program_name}] DNS resolving {scope}")
+-                dnsx([obj_sub.subdomain for obj_sub in obj_subs], scope)
++            subs = get_subdomains_to_resolve(scope, STALE_HOURS)
++            if subs:
++                log_info(logger, f"[{i}/{total_programs}] [{program.program_name}] DNS resolving {scope} ({len(subs)} subdomains)")
++                dnsx(subs, scope)
+             else:
+-                log_warn(logger, f"No subdomains found for scope {scope}")
++                log_info(logger, f"[{program.program_name}] nothing to resolve for {scope}")
+ 
+     log_success(logger, "DNS resolution pipeline complete")
+diff --git a/nuclei/public-config.yaml b/nuclei/public-config.yaml
+index e69de29..085b535 100644
+--- a/nuclei/public-config.yaml
++++ b/nuclei/public-config.yaml
+@@ -0,0 +1,12 @@
++# Light nuclei defaults (the default nuclei profile is ~25 templates x 25 hosts, 150 req/s)
++rate-limit: 20
++bulk-size: 5
++concurrency: 5
++timeout: 10
++retries: 1
++severity:
++  - medium
++  - high
++  - critical
++exclude-tags:
++  - dos
+diff --git a/nuclei/watch_nuclei_all.py b/nuclei/watch_nuclei_all.py
+index 2617e6a..51a06ca 100644
+--- a/nuclei/watch_nuclei_all.py
++++ b/nuclei/watch_nuclei_all.py
+@@ -1,85 +1,87 @@
+ #!/usr/bin/env python3
+-import sys, os, subprocess, tempfile
++import sys, os, shlex, tempfile
+ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+ from config import config
+ from database.db import *
+ from logutil import get_logger, log_info, log_error, log_success, log_warn, log_step
+ from notifier import notify, get_enabled_services
++from runutil import StreamProc, missing_tools
+ 
+ logger = get_logger("watch_nuclei_all")
+ 
+-class colors:
+-    # Reset
+-    RESET = "\033[0m"
+-
+-    # Regular colors
+-    BLACK = "\033[30m"
+-    RED = "\033[31m"
+-    GREEN = "\033[32m"
+-    YELLOW = "\033[33m"
+-    BLUE = "\033[34m"
+-    MAGENTA = "\033[35m"
+-    CYAN = "\033[36m"
+-    WHITE = "\033[37m"
+-    GRAY = "\033[90m"
++# Only scan URLs never scanned, or scanned more than N days ago (never the whole history each run)
++RESCAN_DAYS = float(os.environ.get('NUCLEI_RESCAN_DAYS', '7'))
++# Safety caps per run
++MAX_URLS_PER_RUN = int(os.environ.get('NUCLEI_MAX_URLS_PER_RUN', '2000'))
++CHUNK_SIZE = int(os.environ.get('NUCLEI_CHUNK_SIZE', '200'))
++NUCLEI_TIMEOUT = int(os.environ.get('NUCLEI_TIMEOUT', '14400'))
++# Optional template path(s), comma separated. Default: nuclei's own templates.
++NUCLEI_TEMPLATES = os.environ.get('NUCLEI_TEMPLATES', '')
+ 
+ 
+ def send_notification(message):
+-    """Send notification to all configured services."""
++    """Send notification to all configured services (the notifier splits long messages)."""
+     services = get_enabled_services()
+     if not services:
+         log_warn(logger, "No notification services configured")
+         return
+     notify(message)
+ 
+-def run_command_in_bash(command):
+-    try:
+-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+-        if result.returncode != 0:
+-            log_error(logger, f"Command failed: {command}")
+-            log_error(logger, f"stderr: {result.stderr}")
+-            return False
+-        return result.stdout
+-    except subprocess.CalledProcessError as exc:
+-        log_error(logger, f"Command exception: {exc}")
+ 
+ def create_tempfile(data):
+-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
++    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.txt') as temp_file:
+         temp_file.write(data)
+         return temp_file.name
+ 
++
+ def nuclei(urls):
++    """Scan a batch of URLs. Returns the list of findings, or None if the scan failed."""
+     urls_file = create_tempfile("\n".join(urls) + "\n")
+-
+-    templates_file = config().get('WATCH_DIR') + '/nuclei/templates.txt'
+     nuclei_config = config().get('WATCH_DIR') + '/nuclei/public-config.yaml'
+ 
+-    command = f"nuclei -l {urls_file} -config {nuclei_config} -silent"
+-
+-    if os.path.exists(templates_file):
+-        command = f"nuclei -l {urls_file} -config {nuclei_config} -t {templates_file} -silent"
++    command = f"nuclei -l {shlex.quote(urls_file)} -silent"
++    if os.path.isfile(nuclei_config) and os.path.getsize(nuclei_config) > 0:
++        command += f" -config {shlex.quote(nuclei_config)}"
++    if NUCLEI_TEMPLATES:
++        command += f" -t {shlex.quote(NUCLEI_TEMPLATES)}"
+ 
+     log_info(logger, f"Executing: {command}")
+-    results = run_command_in_bash(command)
++    findings = []
++    proc = StreamProc(command, timeout=NUCLEI_TIMEOUT)
++    try:
++        for line in proc:
++            findings.append(line)
++    finally:
++        os.unlink(urls_file)
+ 
+-    if results and results != '':
+-        send_notification(results)
+-        log_success(logger, f"Nuclei scan complete. {len(results.splitlines())} findings sent to notifications.")
+-    elif results is False:
+-        log_error(logger, "Nuclei scan failed")
+-    else:
+-        log_info(logger, "No nuclei findings")
++    if not proc.ok:
++        log_error(logger, f"Nuclei did not finish cleanly (rc={proc.returncode}, timeout={proc.timed_out})")
++        return None
++    return findings
+ 
+-    os.unlink(urls_file)
+-    return True
+ 
+ if __name__ == "__main__":
+     log_step(logger, "Starting Nuclei vulnerability scan")
+ 
+-    https_obj = HTTP.objects().all()
+-    if https_obj:
+-        urls = [http_obj.url for http_obj in https_obj if http_obj.url]
+-        log_info(logger, f"Running Nuclei against {len(urls)} HTTP services")
+-        nuclei(urls)
+-    else:
+-        log_warn(logger, "No HTTP services found in database")
++    if missing_tools(['nuclei']):
++        log_error(logger, "Required tool not found in PATH: nuclei")
++        sys.exit(1)
++
++    urls = get_urls_for_nuclei(RESCAN_DAYS, MAX_URLS_PER_RUN)
++    if not urls:
++        log_info(logger, "No new HTTP services to scan with nuclei")
++        sys.exit(0)
++
++    log_info(logger, f"Running Nuclei against {len(urls)} HTTP services (max {MAX_URLS_PER_RUN} per run)")
++    total_findings = 0
++    for i in range(0, len(urls), CHUNK_SIZE):
++        chunk = urls[i:i + CHUNK_SIZE]
++        findings = nuclei(chunk)
++        if findings is None:
++            break  # chunk not marked, it will be retried next run
++        mark_urls_nuclei(chunk)
++        if findings:
++            total_findings += len(findings)
++            send_notification("\n".join(findings))
++
++    log_success(logger, f"Nuclei scan complete. {total_findings} findings sent to notifications.")
+diff --git a/runutil.py b/runutil.py
+new file mode 100644
+index 0000000..5d22aac
+--- /dev/null
++++ b/runutil.py
+@@ -0,0 +1,108 @@
++#!/usr/bin/env python3
++"""
++Shared helpers to run external recon tools gently:
++  - every child runs under `nice` (default 19) so it never starves the server
++  - hard timeout, and the whole process group is killed on timeout
++  - StreamProc reads stdout line by line (no huge buffers in RAM)
++
++Env vars:
++    WATCH_NICE         nice level for children (default 19, 0 disables)
++    WATCH_CMD_TIMEOUT  default timeout in seconds (default 7200)
++"""
++import os
++import shutil
++import signal
++import subprocess
++import threading
++
++DEFAULT_TIMEOUT = int(os.environ.get("WATCH_CMD_TIMEOUT", "7200"))
++NICE_LEVEL = os.environ.get("WATCH_NICE", "19")
++
++
++def _wrap(command):
++    argv = ["bash", "-c", command]
++    if NICE_LEVEL and NICE_LEVEL != "0" and shutil.which("nice"):
++        argv = ["nice", "-n", NICE_LEVEL] + argv
++    return argv
++
++
++def _kill(proc):
++    try:
++        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
++    except (ProcessLookupError, PermissionError, OSError):
++        pass
++
++
++def missing_tools(names):
++    """Return the tools from `names` that are not found in PATH."""
++    return [n for n in names if shutil.which(n) is None]
++
++
++def run_bash(command, timeout=None):
++    """
++    Run a shell command (niced, with timeout) and return a CompletedProcess.
++    On timeout the process group is killed and returncode is 124.
++    """
++    timeout = timeout or DEFAULT_TIMEOUT
++    proc = subprocess.Popen(
++        _wrap(command),
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        text=True,
++        errors="replace",
++        start_new_session=True,
++    )
++    try:
++        out, err = proc.communicate(timeout=timeout)
++    except subprocess.TimeoutExpired:
++        _kill(proc)
++        out, err = proc.communicate()
++        return subprocess.CompletedProcess(proc.args, 124, out or "", f"timeout after {timeout}s")
++    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
++
++
++class StreamProc:
++    """
++    Iterate over stdout lines of a niced shell command without buffering
++    the whole output. After iteration: .returncode, .timed_out and .ok are set.
++    """
++
++    def __init__(self, command, timeout=None):
++        self.command = command
++        self.timeout = timeout or DEFAULT_TIMEOUT
++        self.returncode = None
++        self.timed_out = False
++
++    @property
++    def ok(self):
++        return (not self.timed_out) and self.returncode == 0
++
++    def __iter__(self):
++        proc = subprocess.Popen(
++            _wrap(self.command),
++            stdout=subprocess.PIPE,
++            stderr=subprocess.DEVNULL,
++            text=True,
++            errors="replace",
++            bufsize=1,
++            start_new_session=True,
++        )
++
++        def on_timeout():
++            self.timed_out = True
++            _kill(proc)
++
++        timer = threading.Timer(self.timeout, on_timeout)
++        timer.daemon = True
++        timer.start()
++        try:
++            for line in proc.stdout:
++                line = line.strip()
++                if line:
++                    yield line
++        finally:
++            timer.cancel()
++            if proc.poll() is None:
++                _kill(proc)
++            proc.wait()
++            self.returncode = proc.returncode
+diff --git a/scheduler.py b/scheduler.py
+index 9b5b1b0..c242a4e 100644
+--- a/scheduler.py
++++ b/scheduler.py
+@@ -93,7 +93,7 @@ def run_pipeline(phase="all"):
+         "enum_all": ["python3", f"{SCRIPT_DIR}/enum/watch_enum_all.py"],
+         "ns_all": ["python3", f"{SCRIPT_DIR}/ns/watch_ns_all.py"],
+         "httpx_all": ["python3", f"{SCRIPT_DIR}/http/watch_http_all.py"],
+-        # "nuclei_all": ["python3", f"{SCRIPT_DIR}/nuclei/watch_nuclei_all.py"],
++        "nuclei_all": ["python3", f"{SCRIPT_DIR}/nuclei/watch_nuclei_all.py"],
+     }
+ 
+     if phase == "all":

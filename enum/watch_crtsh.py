@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys, os, subprocess, re
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from runutil import run_bash
 from database.db import *
 from logutil import get_logger, log_info, log_error, log_success, log_warn
 
@@ -8,7 +9,7 @@ logger = get_logger("watch_crtsh")
 
 def run_command_in_bash(command):
     try:
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        result = run_bash(command)
 
         if result.returncode != 0:
             log_error(logger, f"Command failed: {command}")
@@ -49,11 +50,15 @@ def crtsh(domain, retries=3):
             """, (domain,))
 
             names = set()
-            for (name,) in cur.fetchall():
-                if name:
-                    name = name.strip().replace(" ", "").lower()
+            # NAME_VALUE can hold several names separated by newlines: split them,
+            # otherwise every name except the last one is lost.
+            for (name_value,) in cur:
+                if not name_value:
+                    continue
+                for name in name_value.replace(" ", "").lower().split("\n"):
+                    name = name.strip().lstrip("*").lstrip(".")
                     if name.endswith("." + domain):
-                        names.add(name.lstrip("."))
+                        names.add(name)
             cur.close()
             conn.close()
             res = sorted(names)
@@ -82,9 +87,7 @@ if __name__ == "__main__":
         subs = crtsh(domain)
 
         if subs:
-            for sub in subs:
-                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
-                    upsert_subdomains(program.program_name, sub, 'crtsh')
+            upsert_subdomains_bulk(program.program_name, subs, 'crtsh')
             log_success(logger, f"Upserted crt.sh results for {domain}")
         else:
             log_warn(logger, f"No subdomains found via crt.sh for {domain}")

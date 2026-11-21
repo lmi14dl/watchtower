@@ -29,6 +29,28 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = get_logger("notifier")
 
+DISCORD_LIMIT = 1900   # Discord max is 2000
+TELEGRAM_LIMIT = 4000  # Telegram max is 4096
+
+
+def _chunks(text, limit):
+    """Split text into pieces <= limit characters, preferring line boundaries."""
+    out, cur = [], ""
+    for line in text.splitlines(True):
+        while len(line) > limit:
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:limit])
+            line = line[limit:]
+        if cur and len(cur) + len(line) > limit:
+            out.append(cur)
+            cur = ""
+        cur += line
+    if cur:
+        out.append(cur)
+    return out
+
 
 def is_discord_enabled():
     """Check if Discord webhook URL is configured."""
@@ -59,18 +81,29 @@ def send_discord(message):
         log_warn(logger, "Discord webhook URL not configured, skipping")
         return False
 
+    import time
+    ok = True
     try:
-        response = requests.post(
-            webhook_url,
-            json={"content": message},
-            timeout=10,
-        )
-        if response.status_code in (204, 200):
-            log_success(logger, "Discord notification sent")
-            return True
-        else:
-            log_error(logger, f"Discord webhook failed: {response.status_code} {response.text}")
-            return False
+        for part in _chunks(str(message), DISCORD_LIMIT):
+            response = requests.post(
+                webhook_url,
+                json={"content": part},
+                timeout=10,
+            )
+            if response.status_code == 429:
+                try:
+                    wait = float(response.json().get("retry_after", 2))
+                except Exception:
+                    wait = 2.0
+                time.sleep(min(wait, 30))
+                response = requests.post(webhook_url, json={"content": part}, timeout=10)
+            if response.status_code in (204, 200):
+                log_success(logger, "Discord notification sent")
+            else:
+                log_error(logger, f"Discord webhook failed: {response.status_code} {response.text}")
+                ok = False
+            time.sleep(0.5)
+        return ok
     except Exception as e:
         log_error(logger, f"Discord notification error: {e}")
         return False
@@ -85,19 +118,23 @@ def send_telegram(message):
         log_warn(logger, "Telegram credentials not configured, skipping")
         return False
 
+    import time
+    ok = True
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        response = requests.post(
-            url,
-            data={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
-            timeout=10,
-        )
-        if response.status_code == 200:
-            log_success(logger, "Telegram notification sent")
-            return True
-        else:
-            log_error(logger, f"Telegram API failed: {response.status_code} {response.text}")
-            return False
+        for part in _chunks(str(message), TELEGRAM_LIMIT):
+            response = requests.post(
+                url,
+                data={"chat_id": chat_id, "text": part, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                log_success(logger, "Telegram notification sent")
+            else:
+                log_error(logger, f"Telegram API failed: {response.status_code} {response.text}")
+                ok = False
+            time.sleep(0.5)
+        return ok
     except Exception as e:
         log_error(logger, f"Telegram notification error: {e}")
         return False

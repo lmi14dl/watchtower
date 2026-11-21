@@ -33,14 +33,14 @@ async def log_requests(request, call_next):
 
 
 @app.get("/")
-async def root():
+def root():
     return {"message": "Welcome to Watchtower API", "docs": "/docs", "redoc": "/redoc"}
 
 
 # --- Programs ---
 
 @app.get("/api/programs/all")
-async def all_programs(user: dict = Depends(authenticate)):
+def all_programs(user: dict = Depends(authenticate)):
     programs = Programs.objects.all()
     response = {}
     for program in programs:
@@ -54,7 +54,7 @@ async def all_programs(user: dict = Depends(authenticate)):
 
 
 @app.get("/api/programs/{program_name}")
-async def get_program(program_name: str = Path(..., description="Program name to look up"), user: dict = Depends(authenticate)):
+def get_program(program_name: str = Path(..., description="Program name to look up"), user: dict = Depends(authenticate)):
     program = Programs.objects(program_name=program_name).first()
     if not program:
         raise HTTPException(status_code=404, detail=f"Program '{program_name}' not found")
@@ -70,7 +70,7 @@ async def get_program(program_name: str = Path(..., description="Program name to
 # --- Subdomains ---
 
 @app.get("/api/subdomains/all")
-async def all_subdomains(
+def all_subdomains(
     limit: int = Query(default=1000, le=10000),
     provider: Optional[str] = Query(default=None, description="Filter by provider (e.g. subfinder, crtsh)"),
     user: dict = Depends(authenticate),
@@ -92,7 +92,7 @@ async def all_subdomains(
 
 
 @app.get("/api/subdomains/domain/{domain}")
-async def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(authenticate)):
+def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(authenticate)):
     subs = Subdomains.objects(scope=domain).all()
     if not subs:
         return {"message": f"No subdomains found for {domain}"}
@@ -109,7 +109,7 @@ async def subdomains_of_domain(domain: str = Path(...), user: dict = Depends(aut
 
 
 @app.get("/api/subdomains/program/{p_name}")
-async def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(authenticate)):
+def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(authenticate)):
     subs = Subdomains.objects(program_name=p_name).all()
     if not subs:
         return {"message": f"No subdomains found for program '{p_name}'"}, 404
@@ -128,7 +128,7 @@ async def subdomains_of_program(p_name: str = Path(...), user: dict = Depends(au
 # --- Live Subdomains ---
 
 @app.get("/api/lives/all")
-async def all_lives(
+def all_lives(
     hours: int = Query(default=12, description="Look back this many hours"),
     user: dict = Depends(authenticate),
 ):
@@ -149,7 +149,7 @@ async def all_lives(
 
 
 @app.get("/api/lives/program/{p_name}")
-async def lives_of_program(
+def lives_of_program(
     p_name: str = Path(...),
     hours: int = Query(default=12),
     user: dict = Depends(authenticate),
@@ -172,7 +172,7 @@ async def lives_of_program(
 
 
 @app.get("/api/lives/domain/{domain}")
-async def lives_of_domain(
+def lives_of_domain(
     domain: str = Path(...),
     hours: int = Query(default=12),
     user: dict = Depends(authenticate),
@@ -195,7 +195,7 @@ async def lives_of_domain(
 
 
 @app.get("/api/lives/fresh")
-async def fresh_lives(
+def fresh_lives(
     hours: int = Query(default=24, description="Hours to look back for fresh subdomains"),
     user: dict = Depends(authenticate),
 ):
@@ -206,25 +206,24 @@ async def fresh_lives(
 
 
 @app.get("/api/lives/provider/{provider}")
-async def lives_of_provider(
+def lives_of_provider(
     provider: str = Path(...),
     hours: int = Query(default=12),
     user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
-    subs_obj = Subdomains.objects(providers=provider).all()
-    if not subs_obj:
+    names = list(Subdomains.objects(providers=provider).scalar('subdomain'))
+    if not names:
         return {"message": f"The '{provider}' provider was not found"}
-    response = ""
-    for sub_obj in subs_obj:
-        lives = LiveSubdomains.objects(subdomain=sub_obj.subdomain, last_update__gte=ago).first()
-        if lives:
-            response += f"{lives.subdomain}\n"
-    return PlainTextResponse(response)
+    found = set()
+    for i in range(0, len(names), 5000):
+        part = names[i:i + 5000]
+        found.update(LiveSubdomains.objects(subdomain__in=part, last_update__gte=ago).scalar('subdomain'))
+    return PlainTextResponse("".join(f"{s}\n" for s in sorted(found)))
 
 
 @app.get("/api/lives/subdomain/{live}")
-async def live_sub_detail(live: str = Path(...), user: dict = Depends(authenticate)):
+def live_sub_detail(live: str = Path(...), user: dict = Depends(authenticate)):
     live_obj = LiveSubdomains.objects(subdomain=live).first()
     sub_obj = Subdomains.objects(subdomain=live).first()
     if live_obj and sub_obj:
@@ -245,7 +244,7 @@ async def live_sub_detail(live: str = Path(...), user: dict = Depends(authentica
 # --- HTTP Services ---
 
 @app.get("/api/http/all")
-async def all_http(
+def all_http(
     hours: int = Query(default=12),
     limit: int = Query(default=1000, le=10000),
     user: dict = Depends(authenticate),
@@ -273,7 +272,7 @@ async def all_http(
 
 
 @app.get("/api/http/fresh/{hours}")
-async def http_fresh(hours: int = Path(..., description="Hours to look back"), user: dict = Depends(authenticate)):
+def http_fresh(hours: int = Path(..., description="Hours to look back"), user: dict = Depends(authenticate)):
     ago = datetime.now() - timedelta(hours=hours)
     fresh = HTTP.objects(created_date__gte=ago).all()
     res_array = [h.url for h in fresh if h.url]
@@ -281,25 +280,24 @@ async def http_fresh(hours: int = Path(..., description="Hours to look back"), u
 
 
 @app.get("/api/http/provider/{provider}")
-async def http_of_provider(
+def http_of_provider(
     provider: str = Path(...),
     hours: int = Query(default=12),
     user: dict = Depends(authenticate),
 ):
     ago = datetime.now() - timedelta(hours=hours)
-    subs_obj = Subdomains.objects(providers=provider).all()
-    if not subs_obj:
+    names = list(Subdomains.objects(providers=provider).scalar('subdomain'))
+    if not names:
         return {"message": f"The '{provider}' provider was not found"}
-    response = ""
-    for sub_obj in subs_obj:
-        http_records = HTTP.objects(subdomain=sub_obj.subdomain, last_update__gte=ago).all()
-        for h in http_records:
-            response += f"{h.url}\n"
-    return PlainTextResponse(response)
+    urls = []
+    for i in range(0, len(names), 5000):
+        part = names[i:i + 5000]
+        urls.extend(HTTP.objects(subdomain__in=part, last_update__gte=ago).scalar('url'))
+    return PlainTextResponse("".join(f"{u}\n" for u in urls if u))
 
 
 @app.get("/api/http/subdomain/{subdomain}")
-async def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(authenticate)):
+def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(authenticate)):
     http_records = HTTP.objects(subdomain=subdomain).all()
     if not http_records:
         return {"message": f"No HTTP services found for subdomain '{subdomain}'"}, 404
@@ -324,7 +322,7 @@ async def http_of_subdomain(subdomain: str = Path(...), user: dict = Depends(aut
 # --- Health check ---
 
 @app.get("/health")
-async def health_check():
+def health_check():
     from mongoengine import connection
     try:
         conn = connection.get_connection()

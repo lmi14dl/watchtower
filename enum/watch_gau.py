@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import sys, os, subprocess, re
+import sys, os, subprocess, re, shlex
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from runutil import run_bash
 from database.db import *
 from logutil import get_logger, log_info, log_error, log_success, log_warn
 
@@ -8,7 +9,7 @@ logger = get_logger("watch_gau")
 
 def run_command_in_bash(command):
     try:
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        result = run_bash(command)
 
         if result.returncode != 0:
             log_error(logger, f"Command failed: {command}")
@@ -25,7 +26,10 @@ class colors:
     RESET = "\033[0m"
 
 def gau(domain):
-    command = f"echo {domain} | gau --config {config().get('GAU_CONFIG')} | unfurl domains | sort -u"
+    cfg = config().get('GAU_CONFIG')
+    cfg_arg = f"--config {shlex.quote(cfg)}" if cfg and os.path.isfile(cfg) else ""
+    max_urls = int(os.environ.get('ENUM_MAX_URLS', '500000'))  # cap huge result sets
+    command = f"echo {shlex.quote(domain)} | gau {cfg_arg} | head -n {max_urls} | unfurl domains | sort -u"
     log_info(logger, f"Executing: {command}")
     res = run_command_in_bash(command)
     if not res:
@@ -40,6 +44,11 @@ if __name__ == "__main__":
         print("Usage: watch_gau <domain>")
         sys.exit(1)
 
+    from runutil import missing_tools
+    if missing_tools(['gau', 'unfurl']):
+        log_error(logger, "Required tool not found in PATH: gau / unfurl")
+        sys.exit(1)
+
     domain = sys.argv[1]
     program = Programs.objects(scopes=domain).first()
 
@@ -48,9 +57,7 @@ if __name__ == "__main__":
         subs = gau(domain)
 
         if subs:
-            for sub in subs:
-                if re.search(r'\.' + re.escape(domain) + r'$', sub, re.IGNORECASE):
-                    upsert_subdomains(program.program_name, sub, 'gau')
+            upsert_subdomains_bulk(program.program_name, subs, 'gau')
             log_success(logger, f"Upserted gau results for {domain}")
         else:
             log_warn(logger, f"No subdomains found via gau for {domain}")

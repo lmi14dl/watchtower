@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import sys, os, subprocess
+import sys, os, subprocess, shlex
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from runutil import run_bash
 from database.db import *
 from config import config
 from logutil import get_logger, log_info, log_error, log_success, log_warn, log_phase, log_step
@@ -9,7 +10,7 @@ logger = get_logger("watch_enum_all")
 
 def run_command_in_bash(command):
     try:
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        result = run_bash(command)
 
         if result.returncode != 0:
             log_error(logger, f"Command failed: {command}")
@@ -37,12 +38,13 @@ if __name__ == "__main__":
             log_info(logger, f"  Enumerating subdomains for scope: {scope}")
             enum_path = config().get("WATCH_DIR") + '/enum'
 
+            q = shlex.quote(scope)
             modules = [
-                ('crtsh', f"python3 {enum_path}/watch_crtsh.py {scope}"),
-                ('subfinder', f"python3 {enum_path}/watch_subfinder.py {scope}"),
-                ('abuse', f"python3 {enum_path}/watch_abuse.py {scope}"),
-                ('wayback', f"python3 {enum_path}/watch_wayback.py {scope}"),
-                ('gau', f"python3 {enum_path}/watch_gau.py {scope}"),
+                ('crtsh', f"python3 {enum_path}/watch_crtsh.py {q}"),
+                ('subfinder', f"python3 {enum_path}/watch_subfinder.py {q}"),
+                ('abuse', f"python3 {enum_path}/watch_abuse.py {q}"),
+                ('wayback', f"python3 {enum_path}/watch_wayback.py {q}"),
+                ('gau', f"python3 {enum_path}/watch_gau.py {q}"),
             ]
 
             for module_name, cmd in modules:

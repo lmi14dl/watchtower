@@ -1,0 +1,12 @@
+# Light nuclei defaults (the default nuclei profile is ~25 templates x 25 hosts, 150 req/s)
+rate-limit: 20
+bulk-size: 5
+concurrency: 5
+timeout: 10
+retries: 1
+severity:
+  - medium
+  - high
+  - critical
+exclude-tags:
+  - dos

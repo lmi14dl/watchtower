@@ -1,19 +1,26 @@
-version: '3.8'
-
 services:
   mongo:
     image: mongo:6.0
     container_name: mongo
     restart: unless-stopped
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.5"]
+    cpus: 1.0
+    mem_limit: 1g
     ports:
       - "127.0.0.1:27017:27017"
     volumes:
       - watchtower-data:/data/db
 
+  # One-shot pipeline. It must NOT restart by itself: when it finishes it exits.
+  # Schedule it from the host instead, e.g. crontab:
+  #   0 */12 * * * cd /opt/watchtower && docker compose run --rm watchtower all
+  # or start the long-running scheduler service below (profile "scheduler").
   watchtower:
     build: .
     container_name: watchtower
-    restart: unless-stopped
+    restart: "no"
+    cpus: 1.0
+    mem_limit: 1g
     depends_on:
       - mongo
     env_file:
@@ -33,11 +40,36 @@ services:
       # - ./programs:/app/programs:ro
     command: ["all"]
 
+  # Optional long-running scheduler (sleeps between runs, runs the pipeline in-container):
+  #   docker compose --profile scheduler up -d scheduler
+  scheduler:
+    build: .
+    container_name: watchtower-scheduler
+    profiles: ["scheduler"]
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 1g
+    depends_on:
+      - mongo
+    env_file:
+      - .env
+    environment:
+      - MONGO_HOST=mongo
+      - PYTHONPATH=/app
+    volumes:
+      - ./volumes/resolvers:/app/config/resolvers:ro
+      - ./volumes/wordlists:/app/config/wordlists:ro
+      - ./volumes/nuclei-templates:/app/nuclei-templates:ro
+      - ./volumes/gau-config:/app/config/gau-config:ro
+    command: ["scheduler", "--runs", "2"]
+
   # Optional: API server (run with: docker compose --profile api up)
   api:
     build: .
     container_name: watchtower-api
     profiles: ["api"]
+    cpus: 0.5
+    mem_limit: 512m
     depends_on:
       - mongo
     env_file:
@@ -59,6 +91,9 @@ services:
     build: .
     container_name: watchtower-api-server
     profiles: ["api-server"]
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 512m
     depends_on:
       - mongo
     env_file:
