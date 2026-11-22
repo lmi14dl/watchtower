@@ -7,7 +7,7 @@ services:
     cpus: 1.0
     mem_limit: 1g
     ports:
-      - "127.0.0.1:27017:27017"
+      - "0.0.0.0:27017:27017"
     volumes:
       - watchtower-data:/data/db
 
@@ -78,7 +78,7 @@ services:
       - MONGO_HOST=mongo
       - PYTHONPATH=/app
     ports:
-      - "127.0.0.1:5000:5000"
+      - "0.0.0.0:5000:5000"
     volumes:
       - ./volumes/resolvers:/app/config/resolvers:ro
       - ./volumes/wordlists:/app/config/wordlists:ro
@@ -102,7 +102,7 @@ services:
       - MONGO_HOST=mongo
       - PYTHONPATH=/app
     ports:
-      - "127.0.0.1:5000:5000"
+      - "0.0.0.0:5000:5000"
     volumes:
       - ./volumes/resolvers:/app/config/resolvers:ro
       - ./volumes/wordlists:/app/config/wordlists:ro
