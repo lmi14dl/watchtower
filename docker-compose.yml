@@ -37,7 +37,7 @@ services:
       # Optional: persist output files
       - watchtower-output:/app/output
       # Your program JSON files are already in the image, but you can override:
-      # - ./programs:/app/programs:ro
+      - ./programs:/app/programs:ro
     command: ["all"]
 
   # Optional long-running scheduler (sleeps between runs, runs the pipeline in-container):
