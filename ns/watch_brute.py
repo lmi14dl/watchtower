@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys, os, subprocess, tempfile
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from runutil import run_bash
 from config import config
 from logutil import get_logger, log_info, log_error, log_success, log_warn
 
@@ -12,7 +13,7 @@ class colors:
 
 def run_command_in_bash(command):
     try:
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        result = run_bash(command)
         if result.returncode != 0:
             log_error(logger, f"Command failed: {command}")
             log_error(logger, f"stderr: {result.stderr}")

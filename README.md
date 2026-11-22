@@ -82,6 +82,30 @@ docker compose logs -f
 docker compose run --rm watchtower bash
 ```
 
+## Resource usage / what changed (performance fixes)
+
+- `docker compose up -d` starts only MongoDB. The pipeline is a one-shot job and no longer restarts in a loop
+  (`restart: "no"`). Schedule it from the host cron, or use the optional scheduler container:
+  ```bash
+  # host cron (twice a day, low priority)
+  0 */12 * * * cd /opt/watchtower && nice -n 19 docker compose run --rm watchtower all
+  # or a long-running scheduler container
+  docker compose --profile scheduler up -d scheduler
+  ```
+- Containers have `cpus` / `mem_limit`; MongoDB cache is limited to 0.5 GB.
+- The Docker image now builds subfinder, httpx, dnsx, nuclei, gau, waybackurls and unfurl (multi-stage build).
+  Phases exit with an error if a required tool is missing (no more silent empty runs).
+- MongoDB: indexes on `subdomain` / `scope` / dates, bulk upserts, program lookups cached.
+  HTTP records are now keyed by URL (host+port), so ports no longer overwrite each other.
+  The legacy unique index on `HTTP(program_name, subdomain)` is dropped automatically on first start.
+- Incremental pipeline: only new/stale subdomains are resolved (`RESOLVE_STALE_HOURS`), only new/stale live hosts are
+  probed (`HTTP_STALE_HOURS`), nuclei scans only URLs never scanned (`NUCLEI_RESCAN_DAYS`).
+- dnsx is used alone (shuffledns/massdns double-resolving removed); httpx defaults to ports 80,443 without
+  tech-detect/favicon; subfinder runs without `-all`; nuclei uses `nuclei/public-config.yaml` (low rate/concurrency).
+  See `.env.example` for every knob.
+- All external tools run under `nice`, with timeouts, streaming output; notifications are batched and split to fit
+  Discord/Telegram limits; logs rotate (5 MB x 3).
+
 ## Scheduler (cron-like automation)
 
 The scheduler runs the full watchtower pipeline at a configurable frequency.

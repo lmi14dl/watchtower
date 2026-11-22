@@ -1,77 +1,80 @@
 #!/usr/bin/env python3
-import sys, os, subprocess, tempfile, json
+import sys, os, shlex, tempfile, json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from config import config
 from database.db import *
 from logutil import get_logger, log_info, log_error, log_success, log_warn
+from runutil import StreamProc, missing_tools
 
 logger = get_logger("watch_ns")
 
-def run_command_in_bash(command):
-    try:
-        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+# Only (re)resolve subdomains that are new or older than this many hours
+STALE_HOURS = float(os.environ.get('RESOLVE_STALE_HOURS', '24'))
+DNSX_THREADS = os.environ.get('DNSX_THREADS', '20')
+DNSX_RATE_LIMIT = os.environ.get('DNSX_RATE_LIMIT', '50')
 
-        if result.returncode != 0:
-            log_error(logger, f"Command failed: {command}")
-            log_error(logger, f"stderr: {result.stderr}")
-            return False
-
-        return result.stdout.splitlines()
-        
-    except subprocess.CalledProcessError as exc:
-        log_error(logger, f"Command exception: {exc}")
-
-def create_tempfile(data):
-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
-        temp_file.write(data)
-        return temp_file.name
-
-class colors:
-    GRAY = "\033[90m"
-    RESET = "\033[0m"
 
 def dnsx(subdomains_array, domain):
-    with tempfile.NamedTemporaryFile(delete=False, mode='w') as temp_file:
+    """Resolve subdomains with dnsx only (no shuffledns/massdns double resolving)."""
+    if not subdomains_array:
+        return True
+
+    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.txt') as temp_file:
         for sub in subdomains_array:
             temp_file.write(sub + "\n")
     subdomains_file = temp_file.name
-    command = f"shuffledns -l {subdomains_file} -silent -d {domain} -mode resolve -r {config()['RESOLVERS_PATH']} -t 10 | dnsx -silent -resp -json -r {config()['RESOLVERS_PATH']}"
-    log_info(logger, f"Executing: {command}")
-    results = run_command_in_bash(command)
 
-    if not results:
-        log_warn(logger, f"No DNS results for {domain}")
-        os.unlink(subdomains_file)
-        return True
+    resolvers = config()['RESOLVERS_PATH']
+    resolvers_arg = f"-r {shlex.quote(resolvers)}" if resolvers and os.path.isfile(resolvers) else ""
+    command = (
+        f"dnsx -l {shlex.quote(subdomains_file)} -silent -a -resp -json "
+        f"-t {DNSX_THREADS} -rl {DNSX_RATE_LIMIT} {resolvers_arg}"
+    )
+    log_info(logger, f"Resolving {len(subdomains_array)} subdomains of {domain}")
+    log_info(logger, f"Executing: {command}")
 
     count = 0
-    for res in results:
-        try:
-            res = json.loads(res)
-            upsert_lives({
-                'subdomain': res['host'],
-                'domain': domain,
-                'ips': res.get('a', []),
-                'cdn': None
-            })
-            count += 1
-        except (json.JSONDecodeError, KeyError) as e:
-            log_error(logger, f"Failed to parse DNS result: {e}")
+    proc = StreamProc(command)
+    try:
+        for line in proc:
+            try:
+                res = json.loads(line)
+                upsert_lives({
+                    'subdomain': res['host'],
+                    'domain': domain,
+                    'ips': res.get('a', []),
+                    'cdn': None
+                })
+                count += 1
+            except (json.JSONDecodeError, KeyError) as e:
+                log_error(logger, f"Failed to parse DNS result: {e}")
+    finally:
+        os.unlink(subdomains_file)
+
+    if proc.ok:
+        mark_subdomains_resolved(domain, subdomains_array)
+    else:
+        log_error(logger, f"dnsx did not finish cleanly for {domain} "
+                          f"(rc={proc.returncode}, timeout={proc.timed_out}); will retry next run")
 
     log_success(logger, f"DNS resolution: {count} live hosts for {domain}")
-    os.unlink(subdomains_file)
     return True
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: watch_ns <domain>")
         sys.exit(1)
 
-    domain = sys.argv[1]
-    obj_subs = Subdomains.objects(scope=domain)
+    if missing_tools(['dnsx']):
+        log_error(logger, "Required tool not found in PATH: dnsx")
+        sys.exit(1)
 
-    if obj_subs:
+    domain = sys.argv[1]
+    subs = get_subdomains_to_resolve(domain, 0)  # single mode: resolve everything
+
+    if subs:
         log_info(logger, f"Running DnsX module for '{domain}'")
-        dnsx([obj_sub.subdomain for obj_sub in obj_subs], domain)
+        dnsx(subs, domain)
     else:
         log_warn(logger, f"No subdomains found for scope {domain}")

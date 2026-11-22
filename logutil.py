@@ -59,7 +59,10 @@ def get_logger(name="watchtower", level="INFO", file_level=None):
 
     if name not in _initialized_loggers:
         # File handler — always DEBUG to capture everything
-        file_handler = logging.FileHandler(get_log_file())
+        import logging.handlers
+        file_handler = logging.handlers.RotatingFileHandler(
+            get_log_file(), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
             "%(asctime)s [%(name)s] %(levelname)s: %(message)s",

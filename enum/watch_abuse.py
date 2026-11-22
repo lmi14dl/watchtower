@@ -49,8 +49,7 @@ if __name__ == "__main__":
         log_info(logger, f"Running abuse module for '{domain}' (program: {program.program_name})")
         subs = abusewhois(domain)
         if subs:
-            for sub in subs:
-                upsert_subdomains(program.program_name, sub, 'abuse')
+            upsert_subdomains_bulk(program.program_name, subs, 'abuse')
             log_success(logger, f"Upserted {len(subs)} abuse subdomains for {domain}")
         else:
             log_warn(logger, f"No subdomains found via AbuseIPDB for {domain}")
